@@ -5,3 +5,5 @@
 
 ------------
 This project is an attempt to make an addon for World of Warcraft version 3.3.5, which will automatically equip the character with armor and weapons with better characteristics when they appear in the bag
+
+The main problem at the moment is that the addon offers characters things that they cannot wear due to the lack of the corresponding skill, for example, a low-level hunter is offered to wear chainmail, although he can only wear cloth and leather.
