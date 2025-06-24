@@ -63,7 +63,7 @@ local playerLevel = UnitLevel("player")
 local allowedArmor = {
     WARRIOR = { Cloth=true, Leather=true, Mail=true, Plate=true, Shields=true },
     PALADIN = { Cloth=true, Leather=true, Mail=true, Plate=true, Shields=true },
-    HUNTER = { Cloth=true, Leather=true, Mail=false },
+    HUNTER = nil, -- будет заполнено ниже
     ROGUE = { Cloth=true, Leather=true },
     PRIEST = { Cloth=true },
     DEATHKNIGHT = { Cloth=true, Leather=true, Mail=true, Plate=true },
