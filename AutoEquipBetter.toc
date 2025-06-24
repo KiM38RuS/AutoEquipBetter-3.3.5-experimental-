@@ -1,0 +1,4 @@
+## Interface: 30300
+## Title: AutoEquipBetter
+## Notes: Автоматическая экипировка лучшего снаряжения из сумки для WoW 3.3.5
+AutoEquipBetter.lua
