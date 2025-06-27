@@ -387,6 +387,7 @@ local function CheckAndCompare()
                     local _, _, rarity, _, _, itemType, itemSubType, _, equipSlot = GetItemInfo(itemLink)
                     if equipSlot == slotToInvType[slotName] then
                         local allowed = true
+                        DebugPrint("itemType:", itemType, "itemSubType:", itemSubType)
                         -- Фильтрация доспехов
                         if itemType == "Armor" then
                             if playerClass == "HUNTER" or playerClass == "SHAMAN" then
