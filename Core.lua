@@ -1,17 +1,231 @@
+-- Аддон AutoEquipBetter v0.10.1a для World of Warcraft 3.3.5a
+--== Важная информация: ==--
+-- Для определения возможности надеть предмет на персонажа нельзя использовать функцию IsUsableItem и поиск красного цвета в тексте подсказки, потому что это не даёт нужного результата. Для точного определения типа и подтипа оружия и брони нужно использовать GetItemInfo(id), а для определения возможности надевания - чтение оружейных и доспеховых навыков персонажа.
+-- Координаты стрелок относительно иконок и другие подобные визуальные элементы менять не нужно. Я настроил их вручную.
 local AEB = LibStub("AceAddon-3.0"):NewAddon("AutoEquipBetter", "AceEvent-3.0", "AceHook-3.0")
 
 local scanner = CreateFrame("GameTooltip", "AEBScanner", nil, "GameTooltipTemplate")
 scanner:SetOwner(WorldFrame, "ANCHOR_NONE")
 
-local statWeights = {
-    ["Ловкость"] = 2.5, ["Сила атаки"] = 1.0, ["Выносливость"] = 0.5,
-    ["Интеллект"] = 0.2, ["Броня"] = 0.05, ["Сила"] = 0.1, ["Дух"] = 0.0
+local AEB_DEBUG_MODE = 1 -- Дебаггер, показывает в тултипе точный внутренний itemType и subType.
+
+-- Веса характеристик: [Класс] -> [Ветка талантов (1, 2, 3)]
+local classStatWeights = {
+    ["HUNTER"] = {
+        [1] = { -- Повелитель зверей (BM)
+            ["УВС"] = 7.5, ["Ловкость"] = 1.8, ["Сила атаки"] = 2.0, ["Рейтинг меткости"] = 4.0, ["Рейтинг критического удара"] = 1.6, ["Рейтинг скорости"] = 1.2, ["Интеллект"] = 0.5
+        },
+        [2] = { -- Стрельба (MM)
+            ["УВС"] = 8.0, ["Ловкость"] = 2.5, ["Рейтинг пробивания брони"] = 2.4, ["Рейтинг меткости"] = 4.0, ["Рейтинг критического удара"] = 1.9, ["Сила атаки"] = 1.0, ["Интеллект"] = 0.5
+        },
+        [3] = { -- Выживание (Surv)
+            ["УВС"] = 7.5, ["Ловкость"] = 2.8, ["Рейтинг меткости"] = 4.0, ["Рейтинг критического удара"] = 1.8, ["Сила атаки"] = 1.0, ["Рейтинг скорости"] = 1.1, ["Интеллект"] = 0.5
+        }
+    },
+    ["WARRIOR"] = {
+        [1] = { -- Оружие (Arms)
+            ["УВС"] = 8.0, ["Сила"] = 2.5, ["Рейтинг пробивания брони"] = 2.2, ["Рейтинг мастерства"] = 3.0, ["Рейтинг меткости"] = 3.5, ["Рейтинг критического удара"] = 1.8
+        },
+        [2] = { -- Неистовство (Fury)
+            ["УВС"] = 8.5, ["Сила"] = 2.4, ["Рейтинг пробивания брони"] = 2.3, ["Рейтинг мастерства"] = 3.0, ["Рейтинг меткости"] = 3.5, ["Рейтинг критического удара"] = 1.9, ["Ловкость"] = 1.2
+        },
+        [3] = { -- Защита (Prot)
+            ["Выносливость"] = 3.5, ["Броня"] = 0.15, ["Рейтинг защиты"] = 2.5, ["Рейтинг уклонения"] = 2.0, ["Рейтинг парирования"] = 1.8, ["Блокирование"] = 1.5, ["Сила"] = 1.2
+        }
+    },
+    ["PALADIN"] = {
+        [1] = { -- Свет (Holy)
+            ["Сила заклинаний"] = 2.0, ["Интеллект"] = 2.2, ["Рейтинг скорости"] = 1.8, ["Рейтинг критического удара"] = 1.2, ["Дух"] = 0.5, ["Восполнение маны"] = 2.5
+        },
+        [2] = { -- Защита (Prot)
+            ["Выносливость"] = 3.5, ["Рейтинг защиты"] = 2.5, ["Броня"] = 0.15, ["Рейтинг уклонения"] = 2.0, ["Рейтинг парирования"] = 1.8, ["Сила"] = 1.5, ["Рейтинг мастерства"] = 2.0
+        },
+        [3] = { -- Воздаяние (Retri)
+            ["Сила"] = 2.5, ["УВС"] = 7.0, ["Рейтинг меткости"] = 3.5, ["Рейтинг мастерства"] = 3.0, ["Рейтинг критического удара"] = 1.8, ["Сила заклинаний"] = 1.0, ["Рейтинг скорости"] = 1.2
+        }
+    },
+    ["DEATHKNIGHT"] = {
+        [1] = { -- Кровь (Blood)
+            ["Сила"] = 2.5, ["Выносливость"] = 3.0, ["Рейтинг мастерства"] = 2.5, ["Рейтинг меткости"] = 3.5, ["Рейтинг пробивания брони"] = 1.8, ["Рейтинг защиты"] = 2.0
+        },
+        [2] = { -- Лед (Frost)
+            ["Сила"] = 2.5, ["УВС"] = 8.0, ["Рейтинг меткости"] = 3.5, ["Рейтинг мастерства"] = 2.5, ["Рейтинг пробивания брони"] = 2.0, ["Рейтинг критического удара"] = 1.6
+        },
+        [3] = { -- Нечестивость (Unholy)
+            ["Сила"] = 2.5, ["Сила атаки"] = 1.0, ["Рейтинг меткости"] = 3.5, ["Рейтинг критического удара"] = 1.7, ["Рейтинг скорости"] = 1.4, ["Сила заклинаний"] = 0.5
+        }
+    },
+    ["ROGUE"] = {
+        [1] = { -- Ликвидация (Assassination)
+            ["Ловкость"] = 2.2, ["Сила атаки"] = 1.0, ["Рейтинг меткости"] = 3.5, ["Рейтинг мастерства"] = 2.5, ["Рейтинг скорости"] = 1.8, ["Рейтинг критического удара"] = 1.6
+        },
+        [2] = { -- Бой (Combat)
+            ["УВС"] = 6.0, ["Ловкость"] = 2.0, ["Рейтинг пробивания брони"] = 2.4, ["Рейтинг мастерства"] = 3.0, ["Рейтинг меткости"] = 3.5, ["Сила атаки"] = 1.0
+        },
+        [3] = { -- Скрытность (Subtlety)
+            ["Ловкость"] = 2.4, ["Сила атаки"] = 1.0, ["Рейтинг пробивания брони"] = 1.8, ["Рейтинг критического удара"] = 1.8, ["Рейтинг меткости"] = 3.0
+        }
+    },
+    ["DRUID"] = {
+        [1] = { -- Баланс (Balance)
+            ["Сила заклинаний"] = 2.0, ["Рейтинг скорости"] = 1.7, ["Рейтинг критического удара"] = 1.5, ["Рейтинг меткости"] = 3.5, ["Интеллект"] = 1.0, ["Дух"] = 0.8
+        },
+        [2] = { -- Сила зверя (Feral)
+            ["Ловкость"] = 2.5, ["Рейтинг пробивания брони"] = 2.2, ["Сила"] = 1.5, ["Рейтинг мастерства"] = 2.5, ["Рейтинг меткости"] = 3.5, ["Выносливость"] = 2.0
+        },
+        [3] = { -- Исцеление (Restoration)
+            ["Сила заклинаний"] = 2.0, ["Дух"] = 1.8, ["Рейтинг скорости"] = 1.6, ["Интеллект"] = 1.4, ["Восполнение маны"] = 2.0
+        }
+    },
+    ["SHAMAN"] = {
+        [1] = { -- Стихии (Elemental)
+            ["Сила заклинаний"] = 2.0, ["Рейтинг скорости"] = 1.6, ["Рейтинг меткости"] = 3.5, ["Рейтинг критического удара"] = 1.4, ["Интеллект"] = 1.0
+        },
+        [2] = { -- Совершенствование (Enhancement)
+            ["Сила атаки"] = 1.0, ["Ловкость"] = 1.8, ["Сила заклинаний"] = 1.4, ["Рейтинг меткости"] = 3.5, ["Рейтинг мастерства"] = 2.5, ["Рейтинг скорости"] = 1.6
+        },
+        [3] = { -- Исцеление (Restoration)
+            ["Сила заклинаний"] = 2.0, ["Рейтинг скорости"] = 1.7, ["Интеллект"] = 1.2, ["Восполнение маны"] = 2.5, ["Рейтинг критического удара"] = 1.0
+        }
+    },
+    ["MAGE"] = {
+        [1] = { -- Тайная магия (Arcane)
+            ["Сила заклинаний"] = 2.0, ["Интеллект"] = 1.4, ["Рейтинг скорости"] = 1.6, ["Рейтинг критического удара"] = 1.3, ["Рейтинг меткости"] = 3.5
+        },
+        [2] = { -- Огонь (Fire)
+            ["Сила заклинаний"] = 2.0, ["Рейтинг критического удара"] = 1.8, ["Рейтинг скорости"] = 1.5, ["Рейтинг меткости"] = 3.5, ["Дух"] = 0.8
+        },
+        [3] = { -- Лед (Frost)
+            ["Сила заклинаний"] = 2.0, ["Рейтинг скорости"] = 1.4, ["Рейтинг критического удара"] = 1.4, ["Рейтинг меткости"] = 3.5
+        }
+    },
+    ["WARLOCK"] = {
+        [1] = { -- Колдовство (Affliction)
+            ["Сила заклинаний"] = 2.1, ["Рейтинг скорости"] = 1.7, ["Дух"] = 1.2, ["Рейтинг меткости"] = 3.5, ["Рейтинг критического удара"] = 1.3
+        },
+        [2] = { -- Демонология (Demonology)
+            ["Сила заклинаний"] = 2.2, ["Рейтинг скорости"] = 1.5, ["Рейтинг критического удара"] = 1.4, ["Рейтинг меткости"] = 3.5, ["Дух"] = 0.7
+        },
+        [3] = { -- Разрушение (Destruction)
+            ["Сила заклинаний"] = 2.0, ["Рейтинг скорости"] = 1.6, ["Рейтинг критического удара"] = 1.6, ["Рейтинг меткости"] = 3.5
+        }
+    },
+    ["PRIEST"] = {
+        [1] = { -- Послушание (Discipline)
+            ["Сила заклинаний"] = 2.0, ["Интеллект"] = 1.8, ["Рейтинг скорости"] = 1.4, ["Дух"] = 1.0, ["Восполнение маны"] = 2.0
+        },
+        [2] = { -- Свет (Holy)
+            ["Сила заклинаний"] = 2.0, ["Дух"] = 1.8, ["Рейтинг скорости"] = 1.6, ["Интеллект"] = 1.2, ["Восполнение маны"] = 1.5
+        },
+        [3] = { -- Тьма (Shadow)
+            ["Сила заклинаний"] = 2.0, ["Рейтинг скорости"] = 1.8, ["Рейтинг критического удара"] = 1.5, ["Рейтинг меткости"] = 3.5, ["Дух"] = 1.0
+        }
+    }
 }
 
+-- Словарь для перевода подтипов оружия из GetItemInfo в названия навыков из книги
+local subTypeToSkill = {
+	["Арбалеты"] = "Арбалеты", 
+	["Двуручные мечи"] = "Двуручные мечи", 
+	["Двуручные топоры"] = "Двуручные топоры", 
+	["Древковое"] = "Древковое оружие", 
+    ["Кинжалы"] = "Кинжалы", 
+	["Луки"] = "Луки", 
+	["Метательное"] = "Метательное оружие", 
+	["Одноручные мечи"] = "Мечи", 
+	["Огнестрельное"] = "Огнестрельное оружие", 
+	["Посохи"] = "Посохи", 
+	["Одноручные топоры"] = "Топоры", 
+	["Одноручное дробящее"] = "Дробящее оружие", 
+	["Двуручное дробящее"] = "Двуручное дробящее оружие", 
+	["Кистевое"] = "Кистевое", 
+	["Жезлы"] = "Жезлы", 
+	["Удочки"] = "Рыбная ловля", 
+}
+
+AEB.knownSkills = {}
+
+-- Функция сканирует книгу навыков игрока и сохраняет их в таблицу
+function AEB:UpdateKnownSkills()
+    wipe(self.knownSkills)
+    for i = 1, GetNumSkillLines() do
+        local skillName, header = GetSkillLineInfo(i)
+        if not header and skillName then
+            self.knownSkills[skillName] = true
+        end
+    end
+end
+
+-- Новая динамическая проверка возможности надеть предмет
+function AEB:CanPlayerWear(itemType, subType)
+    -- Всегда разрешаем ткань и бижутерию (кольца, шеи, триньки)
+    if subType == "Тканевые" or subType == "Разное" then return true end
+    if itemType ~= "Оружие" and itemType ~= "Доспехи" then return true end
+
+    -- Проверка оружия: строго ищем совпадение по таблице навыков
+    if itemType == "Оружие" then
+        local requiredSkill = subTypeToSkill[subType]
+        if requiredSkill then
+            return self.knownSkills[requiredSkill] or false
+        end
+        return true -- Если попадётся неизвестный тип, разрешаем
+    end
+
+    -- Проверка доспехов: работает по принципу иерархии (Латы -> Кольчуга -> Кожа)
+    if itemType == "Доспехи" then
+        if subType == "Щиты" then
+            return self.knownSkills["Щит"] or false
+        end
+        if subType == "Латные" then
+            return self.knownSkills["Латные доспехи"] or false
+        end
+        if subType == "Кольчужные" then
+            -- Кто умеет носить латы, тот умеет носить и кольчугу
+            return self.knownSkills["Кольчужные доспехи"] or self.knownSkills["Латные доспехи"] or false
+        end
+        if subType == "Кожаные" then
+            -- Кто умеет носить кольчугу или латы, тот умеет носить и кожу
+            return self.knownSkills["Кожаные доспехи"] or self.knownSkills["Кольчужные доспехи"] or self.knownSkills["Латные доспехи"] or false
+        end
+        
+        -- Разрешаем всё остальное (Манускрипты, Тотемы, Идолы и т.д.)
+        return true 
+    end
+
+    return true
+end
+
+local statWeights = {} -- Текущие веса (определяются динамически)
+
+-- Расширенный парсер, учитывающий и белые, и зелёные тексты
 local statConfig = {
-    ["Сила"] = "%+(%d+) к силе", ["Ловкость"] = "%+(%d+) к ловкости",
-    ["Выносливость"] = "%+(%d+) к выносливости", ["Интеллект"] = "%+(%d+) к интеллекту",
-    ["Дух"] = "%+(%d+) к духу", ["Броня"] = "Броня: (%d+)", ["Сила атаки"] = "%+(%d+) к силе атаки"
+    -- Основные характеристики (белые)
+    { name = "Сила", pattern = "%+(%d+) к силе" },
+    { name = "Ловкость", pattern = "%+(%d+) к ловкости" },
+    { name = "Выносливость", pattern = "%+(%d+) к выносливости" },
+    { name = "Интеллект", pattern = "%+(%d+) к интеллекту" },
+    { name = "Дух", pattern = "%+(%d+) к духу" },
+    { name = "Броня", pattern = "Броня: (%d+)" },
+    { name = "УВС", pattern = "%(([%d%.]+) ед%. урона в секунду%)" },
+    
+    -- Вторичные характеристики (зелёные)
+    { name = "Сила атаки", pattern = "Сила атаки %+(%d+)" },
+    { name = "Сила атаки", pattern = "%+(%d+) к силе атаки" }, -- Для чарок/камней
+    { name = "Рейтинг критического удара", pattern = "критического удара %+(%d+)" },
+    { name = "Рейтинг меткости", pattern = "Рейтинг меткости %+(%d+)" },
+    { name = "Рейтинг скорости", pattern = "Рейтинг скорости %+(%d+)" },
+    { name = "Рейтинг пробивания брони", pattern = "пробивания брони %+(%d+)" },
+    { name = "Рейтинг мастерства", pattern = "Рейтинг мастерства %+(%d+)" }, -- Это Expertise
+    
+    -- Заклинатели
+    { name = "Сила заклинаний", pattern = "силу заклинаний на (%d+)" },
+    { name = "Восполнение маны", pattern = "восполняет (%d+) ед%. маны раз в 5 сек" },
+    
+    -- Танковские и ПвП статы
+    { name = "Рейтинг защиты", pattern = "Рейтинг защиты %+(%d+)" },
+    { name = "Рейтинг уклонения", pattern = "Рейтинг уклонения %+(%d+)" },
+    { name = "Рейтинг парирования", pattern = "Рейтинг парирования %+(%d+)" },
+    { name = "Рейтинг устойчивости", pattern = "Рейтинг устойчивости %+(%d+)" }
 }
 
 local equipSlotMap = {
@@ -53,12 +267,20 @@ function AEB:OnInitialize()
     self:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 	self:RegisterEvent("TRADE_SKILL_SHOW")
     self:RegisterEvent("QUEST_COMPLETE")
-    self:RegisterEvent("SKILL_LINES_CHANGED", "UpdateKnownSkills")
+    -- Подписываемся на смену талантов (срабатывает и при логине, и при смене спека)
+    self:RegisterEvent("PLAYER_TALENT_UPDATE", "UpdateStatWeights")
+    -- Вызываем принудительно при загрузке, чтобы тултипы работали сразу
+    self:UpdateStatWeights()
+	self:RegisterEvent("SKILL_LINES_CHANGED", "UpdateKnownSkills")
     self:UpdateKnownSkills()
     
     -- Реагируем на прокрутку окон сумок и торговца
     hooksecurefunc("MerchantFrame_Update", function() isDirty = true end)
     hooksecurefunc("ContainerFrame_Update", function() isDirty = true end)
+    
+    -- Определяем класс игрока и загружаем его веса
+    local _, playerClass = UnitClass("player")
+    statWeights = classStatWeights[playerClass] or {}
 end
 
 function AEB:BAG_UPDATE() isDirty = true end
@@ -142,9 +364,12 @@ function AEB:ScanItem(itemLink)
     for i = 1, scanner:NumLines() do
         local text = _G["AEBScannerTextLeft"..i]:GetText()
         if text then
-            for name, pat in pairs(statConfig) do
-                local val = text:match(pat)
-                if val then stats[name] = tonumber(val) or val end
+            for _, config in ipairs(statConfig) do
+                local val = text:match(config.pattern)
+                if val then 
+                    -- Суммируем, если характеристика встречается дважды (например, белый + зеленый стат)
+                    stats[config.name] = (stats[config.name] or 0) + (tonumber(val) or val)
+                end
             end
         end
     end
@@ -154,7 +379,17 @@ end
 function AEB:GetScore(stats)
     local score = 0
     for n, v in pairs(stats) do
-        if type(v) == "number" and statWeights[n] then score = score + (v * statWeights[n]) end
+        if type(v) == "number" then
+            local weight = statWeights[n]
+            if not weight then
+                if n == "Броня" then weight = 0.001
+                elseif n == "УВС" then weight = 0.1
+                elseif n == "Выносливость" then weight = 0.05
+                else weight = 0
+                end
+            end
+            score = score + (v * weight)
+        end
     end
     return score
 end
@@ -225,7 +460,7 @@ function AEB:RefreshArrows()
     self:ReleaseAllArrows()
     if InCombatLockdown() then return end
     
-    -- 1. Предварительный отбор лучшего в сумках (Внутренняя конкуренция)
+    -- 1. Предварительный отбор лучшего в сумках
     local bestBags = {} 
     for bag = 0, 4 do
         for slot = 1, GetContainerNumSlots(bag) do
@@ -235,11 +470,7 @@ function AEB:RefreshArrows()
                 if id and not blacklist[id] then
                     local _, _, _, _, minLvl, itemType, subType, _, loc = GetItemInfo(link)
                     if loc and equipSlotMap[loc] then
-                        local hasSkill = true
-                        if itemType == "Доспехи" or itemType == "Оружие" then
-                            hasSkill = self.knownSkills[subType]
-                        end
-                        if hasSkill and (not minLvl or minLvl <= UnitLevel("player")) then
+                        if (not minLvl or minLvl <= UnitLevel("player")) and self:CanPlayerWear(itemType, subType) then
                             local score = self:GetScoreForLink(link)
                             if not bestBags[loc] or score > bestBags[loc].score then
                                 bestBags[loc] = { link = link, id = id, score = score, bag = bag, slot = slot, loc = loc }
@@ -251,24 +482,23 @@ function AEB:RefreshArrows()
         end
     end
     
-    -- 2. Предварительный отбор у торговца
+    -- 2. Предварительный отбор у торговца (Ищем ЛУЧШЕЕ на слот среди текущей страницы)
     local bestMerchant = {}
     if MerchantFrame and MerchantFrame:IsVisible() then
-        for i = 1, GetMerchantNumItems() do
-            local link = GetMerchantItemLink(i)
+        for i = 1, 10 do -- На странице торговца всегда 10 слотов
+            local index = (((MerchantFrame.page or 1) - 1) * 10) + i
+            local link = GetMerchantItemLink(index)
+            
             if link and IsEquippableItem(link) then
-                local id = link:match("item:(%d+)")
-                if id and not blacklist[id] then
-                    local _, _, _, _, minLvl, itemType, subType, _, loc = GetItemInfo(link)
-                    if loc and equipSlotMap[loc] then
-                        local hasSkill = true
-                        if itemType == "Доспехи" or itemType == "Оружие" then
-                            hasSkill = self.knownSkills[subType]
-                        end
-                        if hasSkill and (not minLvl or minLvl <= UnitLevel("player")) then
-                            local score = self:GetScoreForLink(link)
+                local _, _, _, _, minLvl, itemType, subType, _, loc = GetItemInfo(link)
+                if loc and equipSlotMap[loc] then
+                    if (not minLvl or minLvl <= UnitLevel("player")) and self:CanPlayerWear(itemType, subType) then
+                        local score = self:GetScoreForLink(link)
+                        local oldScore, oldLink = self:GetEquippedScoreAndLink(loc)
+                        
+                        if score > oldScore or not oldLink then
                             if not bestMerchant[loc] or score > bestMerchant[loc].score then
-                                bestMerchant[loc] = { link = link, id = id, score = score, index = i, loc = loc }
+                                bestMerchant[loc] = { index = i, score = score, loc = loc }
                             end
                         end
                     end
@@ -277,11 +507,10 @@ function AEB:RefreshArrows()
         end
     end
     
-    -- 3. Финальное сравнение с надетым и отрисовка
-    -- Обработка сумок (создание очередей UI и стрелочек)
+    -- 3. Отрисовка стрелочек для сумок и добавление в очередь UI
     for loc, data in pairs(bestBags) do
         local oldScore, oldLink = self:GetEquippedScoreAndLink(loc)
-        if data.score > oldScore then
+        if data.score > oldScore or not oldLink then
             local btn = self:GetContainerButton(data.bag, data.slot)
             if btn and btn:IsVisible() then
                 local arrow = self:GetArrowFrame()
@@ -290,21 +519,16 @@ function AEB:RefreshArrows()
                 arrow:Show()
             end
             
-            -- Добавляем в очередь окон
             local alreadyInQueue = false
             for _, q in ipairs(itemQueue) do if q.id == data.id then alreadyInQueue = true end end
             if not alreadyInQueue then
-                -- Инициализируем глобальные счетчики при новой пачке предметов
                 if #itemQueue == 0 then
                     self.queueCurrent = 1
                     self.queueTotal = 0
                 end
                 table.insert(itemQueue, {link = data.link, id = data.id, score = data.score, oldScore = oldScore, oldLink = oldLink, loc = data.loc})
                 self.queueTotal = self.queueTotal + 1
-                
                 self:ShowNextInQueue()
-                
-                -- Если окно уже открыто, динамически обновляем счетчик при поступлении новых вещей
                 if mainFrame and mainFrame:IsVisible() and self.queueTotal > 1 then
                     mainFrame.count:SetText(self.queueCurrent .. "/" .. self.queueTotal)
                 end
@@ -312,17 +536,15 @@ function AEB:RefreshArrows()
         end
     end
     
-    -- Обработка торговца (только стрелочки)
+    -- 4. Отрисовка стрелочек для торговца
     for loc, data in pairs(bestMerchant) do
-        local oldScore, oldLink = self:GetEquippedScoreAndLink(loc)
-        if data.score > oldScore then
-            local btn = self:GetMerchantButton(data.index)
-            if btn and btn:IsVisible() then
-                local arrow = self:GetArrowFrame()
-                arrow:SetParent(btn)
-                arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 5, -3)
-                arrow:Show()
-            end
+        local btn = _G["MerchantItem"..data.index.."ItemButton"]
+        if btn and btn:IsVisible() then
+            local arrow = self:GetArrowFrame()
+            arrow:SetParent(btn)
+            arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 5, -3)
+            arrow:SetFrameLevel(btn:GetFrameLevel() + 5) -- Гарантия поверх иконки
+            arrow:Show()
         end
     end
 end
@@ -544,24 +766,6 @@ function AEB:CreateUI(itemLink, oldItemLink)
     mainFrame:Show()
 end
 
-function AEB:UpdateKnownSkills()
-    self.knownSkills = {}
-    local currentHeader = nil
-    
-    for i = 1, GetNumSkillLines() do
-        local name, isHeader = GetSkillLineInfo(i)
-        
-        if isHeader then
-            currentHeader = name
-        else
-            if currentHeader == "Доспехи" or currentHeader == "Оружейные навыки" then
-                local cleanName = name:gsub(" доспехи", "")
-                self.knownSkills[cleanName] = true
-            end
-        end
-    end
-end
-
 -- === ИНТЕГРАЦИЯ В ПРОФЕССИИ (TRADESKILL) ===
 function AEB:TRADE_SKILL_SHOW()
     -- Окно профессий загружается по требованию (LoD), поэтому хукаем безопасно
@@ -677,13 +881,87 @@ function AEB:QUEST_COMPLETE()
     end
 end
 
+-- Функция определения активной специализации и обновления весов
+function AEB:UpdateStatWeights()
+    local _, playerClass = UnitClass("player")
+    local activeGroup = GetActiveTalentGroup()
+    local highestPoints = 0
+    local activeTab = 1 -- Значение по умолчанию (первая ветка). Сработает, если талантов нет вообще или при ничьей.
+
+    for i = 1, GetNumTalentTabs() do
+        local _, _, pointsSpent = GetTalentTabInfo(i, false, false, activeGroup)
+        -- Строгое превосходство: если очков поровну (например 1-1-0), останется первая найденная ветка
+        if pointsSpent and pointsSpent > highestPoints then
+            highestPoints = pointsSpent
+            activeTab = i
+        end
+    end
+
+    if classStatWeights[playerClass] and classStatWeights[playerClass][activeTab] then
+        statWeights = classStatWeights[playerClass][activeTab]
+    else
+        statWeights = {}
+    end
+end
+
 -- === ИНФОРМАТИВНЫЕ ТУЛТИПЫ ===
 local function ProcessTooltip(tooltip)
-    -- Получаем текущий предмет из тултипа
     local name, link = tooltip:GetItem()
-    if not link or not IsEquippableItem(link) then return end
+    if not link then return end
 
-    local _, _, _, _, _, _, _, _, loc = GetItemInfo(link)
+    -- Извлекаем чистый ID предмета для надежности
+    local id = link:match("item:(%d+)")
+    if not id or not IsEquippableItem(id) then return end
+
+    -- Передаем ID вместо линка
+    local _, _, _, _, _, itemType, subType, _, loc = GetItemInfo(id)
+    
+    -- === ДЕБАГГЕР ===
+    if AEB_DEBUG_MODE == 1 then
+        tooltip:AddLine(string.format("|cff00ffff[Debug]|r Type: |cffffffff%s|r", tostring(itemType)))
+        tooltip:AddLine(string.format("|cff00ffff[Debug]|r Sub: |cffffffff%s|r", tostring(subType)))
+        
+        -- Фильтруем только интересующие нас оружейные и доспеховые навыки
+		-- НЕ МЕНЯТЬ! НАСТРОЕНО ВРУЧНУЮ! --
+        local trackedSkills = {
+            "Латные доспехи", "Кольчужные доспехи", "Кожаные доспехи", 
+			"Щит", 
+			"Арбалеты", 
+			"Двуручные мечи", 
+			"Двуручное дробящее оружие", 
+			"Двуручные топоры", 
+			"Древковое оружие", 
+			"Кинжалы", 
+			"Кистевое", 
+			"Луки", 
+			"Метательное оружие", 
+			"Мечи", 
+			"Огнестрельное оружие", 
+			"Дробящее оружие", 
+			"Посохи", 
+			"Жезлы", 
+			"Топоры", 
+			"Рыбная ловля"
+        }
+        
+        local known = {}
+        for _, skill in ipairs(trackedSkills) do
+            if AEB.knownSkills[skill] then
+                table.insert(known, skill)
+            end
+        end
+        
+        if #known > 0 then
+            -- Параметр true в конце включает перенос текста (WordWrap), чтобы тултип не был слишком широким
+            tooltip:AddLine("|cff00ffff[Debug]|r Навыки: |cffaaaaaa" .. table.concat(known, ", ") .. "|r", 1, 1, 1, true)
+        else
+            tooltip:AddLine("|cff00ffff[Debug]|r Навыки: |cffaaaaaaНет отслеживаемых|r")
+        end
+        
+        tooltip:Show()
+    end
+    -- ================
+
     if not loc or not equipSlotMap[loc] then return end
 
     local score = AEB:GetScoreForLink(link)
@@ -692,19 +970,16 @@ local function ProcessTooltip(tooltip)
     local oldScore, oldLink = AEB:GetEquippedScoreAndLink(loc)
     
     if score > oldScore then
-        local pct = 0
-        if oldScore == 0 then
-            pct = 100 -- Если слот пустой
-        else
-            pct = math.floor(((score - oldScore) / oldScore) * 100)
+        local pct = 100
+        -- Расчет: новый предмет берется за 100%
+        if score > 0 and oldScore > 0 then
+            pct = math.floor(((score - oldScore) / score) * 100)
+            if pct > 100 then pct = 100 end
+            if pct < 1 then pct = 1 end
         end
         
-        -- Получаем имя старого предмета для отображения
         local oldName = oldLink and GetItemInfo(oldLink) or "Ничего не надето"
-        
-        -- Добавляем строку. 1, 1, 0 — это базовый цвет строки (жёлтый), но проценты зеленые благодаря тегу |cff00ff00
         tooltip:AddLine(string.format("На |cff00ff00%d%%|r лучше, чем [%s]", pct, oldName), 1, 1, 0)
-        -- Обязательно вызываем Show, чтобы фрейм пересчитал свою высоту в 3.3.5
         tooltip:Show()
     end
 end
