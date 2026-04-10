@@ -2,7 +2,8 @@
 ## Title: AutoEquipBetter
 ## Notes: Анализ и сравнение экипировки.
 ## Author: KiM38RuS
-## Version: 0.10.1a
+## Version: 0.11.0a
+## SavedVariables: AutoEquipBetterDB
 
 embeds.xml
 Core.lua
