@@ -1,7 +1,7 @@
--- Аддон AutoEquipBetter v0.11.3a для World of Warcraft 3.3.5a
+-- Аддон AutoEquipBetter v0.11.1a для World of Warcraft 3.3.5a
 --== Важная информация: ==--
 -- Для определения возможности надеть предмет на персонажа нельзя использовать функцию IsUsableItem и поиск красного цвета в тексте подсказки, потому что это не даёт нужного результата. Для точного определения типа и подтипа оружия и брони нужно использовать GetItemInfo(id), а для определения возможности надевания - чтение оружейных и доспеховых навыков персонажа.
--- Координаты стрелок относительно иконок и другие подобные визуальные элементы менять не нужно без явного указания. Я настроил их вручную.
+-- Координаты стрелок относительно иконок и другие подобные визуальные элементы менять не нужно. Я настроил их вручную.
 local AEB = LibStub("AceAddon-3.0"):NewAddon("AutoEquipBetter", "AceEvent-3.0", "AceHook-3.0")
 
 local scanner = CreateFrame("GameTooltip", "AEBScanner", nil, "GameTooltipTemplate")
@@ -154,27 +154,6 @@ function AEB:UpdateKnownSkills()
             self.knownSkills[skillName] = true
         end
     end
-end
-
--- Проверка способности "Бой двумя оружиями" (Dual Wield)
-function AEB:CanDualWield()
-    local spellName = GetSpellInfo(674) -- ID способности "Бой двумя оружиями"
-    if spellName and GetSpellInfo(spellName) then
-        return true
-    end
-    return false
-end
-
--- Проверка таланта "Хватка титана" (Titan's Grip) для воинов
-function AEB:HasTitansGrip()
-    local _, class = UnitClass("player")
-    if class ~= "WARRIOR" then return false end
-
-    local name, iconTexture, tier, column, currRank = GetTalentInfo(2, 27)
-    if currRank and currRank > 0 then
-        return true
-    end
-    return false
 end
 
 -- Новая динамическая проверка возможности надеть предмет
@@ -536,8 +515,8 @@ function AEB:GetEquippedScoreAndLink(loc)
     return score1, link1
 end
 
-local mainHandLocs = { ["INVTYPE_WEAPONMAINHAND"] = true, ["INVTYPE_WEAPON"] = true, ["INVTYPE_2HWEAPON"] = true }
-local offHandLocs = { ["INVTYPE_WEAPONOFFHAND"] = true, ["INVTYPE_WEAPON"] = true, ["INVTYPE_SHIELD"] = true, ["INVTYPE_HOLDABLE"] = true, ["INVTYPE_2HWEAPON"] = true }
+local mainHandLocs = { ["INVTYPE_WEAPONMAINHAND"] = true, ["INVTYPE_WEAPON"] = true }
+local offHandLocs = { ["INVTYPE_WEAPONOFFHAND"] = true, ["INVTYPE_WEAPON"] = true, ["INVTYPE_SHIELD"] = true, ["INVTYPE_HOLDABLE"] = true }
 
 function AEB:GetBestItemFromBags(allowedLocs)
     local bestScore = 0
@@ -550,18 +529,10 @@ function AEB:GetBestItemFromBags(allowedLocs)
                 if id and not self.db.blacklist[id] then
                     local _, _, _, _, minLvl, itemType, subType, _, loc = GetItemInfo(link)
                     if allowedLocs[loc] and (not minLvl or minLvl <= UnitLevel("player")) and self:CanPlayerWear(itemType, subType) then
-                        -- Дополнительная проверка: если ищем для offhand и это одноручное оружие
-                        if allowedLocs == offHandLocs and loc == "INVTYPE_WEAPON" and not self:CanDualWield() then
-                            -- Пропускаем одноручное оружие для offhand без Dual Wield
-                        -- Дополнительная проверка: если ищем для offhand и это двуручное оружие
-                        elseif allowedLocs == offHandLocs and loc == "INVTYPE_2HWEAPON" and not self:HasTitansGrip() then
-                            -- Пропускаем двуручное оружие для offhand без Titan's Grip
-                        else
-                            local score = self:GetScoreForLink(link)
-                            if score > bestScore then
-                                bestScore = score
-                                bestLink = link
-                            end
+                        local score = self:GetScoreForLink(link)
+                        if score > bestScore then
+                            bestScore = score
+                            bestLink = link
                         end
                     end
                 end
@@ -588,16 +559,14 @@ function AEB:GetUpgradeInfo(newItemLink, loc, newItemScore)
             if l == "INVTYPE_2HWEAPON" then isEqMH2H = true end
         end
 
-        local hasTitansGrip = self:HasTitansGrip()
+        local hasTitansGrip = (isEqMH2H and eqOHLink ~= nil)
 
         if loc == "INVTYPE_2HWEAPON" then
             if hasTitansGrip then
-                -- С талантом "Хватка титана" можно носить два двуручника
                 local targetScore = math.min(eqMHScore, eqOHScore)
                 local targetLink = (eqMHScore <= eqOHScore) and eqMHLink or eqOHLink
                 if newItemScore > targetScore then return true, newItemScore, targetScore, targetLink, nil, nil, false end
             else
-                -- Без таланта двуручник заменяет оба слота
                 local totalEqScore = eqMHScore + eqOHScore
                 if newItemScore > totalEqScore then
                     local names = {}
@@ -646,20 +615,9 @@ function AEB:GetUpgradeInfo(newItemLink, loc, newItemScore)
         elseif loc == "INVTYPE_WEAPONOFFHAND" or loc == "INVTYPE_SHIELD" or loc == "INVTYPE_HOLDABLE" then
             if newItemScore > eqOHScore then return true, newItemScore, eqOHScore, eqOHLink, nil, nil, false end
         elseif loc == "INVTYPE_WEAPON" then
-            -- Проверяем способность носить оружие в левой руке
-            if not self:CanDualWield() then
-                -- Без Dual Wield одноручное оружие может быть только в mainhand
-                if newItemScore > eqMHScore then
-                    return true, newItemScore, eqMHScore, eqMHLink, nil, nil, false
-                end
-            else
-                -- С Dual Wield сравниваем с худшим из двух слотов
-                local targetScore = math.min(eqMHScore, eqOHScore)
-                local targetLink = (eqMHScore <= eqOHScore) and eqMHLink or eqOHLink
-                if newItemScore > targetScore then
-                    return true, newItemScore, targetScore, targetLink, nil, nil, false
-                end
-            end
+            local targetScore = math.min(eqMHScore, eqOHScore)
+            local targetLink = (eqMHScore <= eqOHScore) and eqMHLink or eqOHLink
+            if newItemScore > targetScore then return true, newItemScore, targetScore, targetLink, nil, nil, false end
         end
         return false
     end
@@ -1893,52 +1851,28 @@ local function ProcessTooltip(tooltip)
     if AEB_DEBUG_MODE == 1 then
         tooltip:AddLine(string.format("|cff00ffff[Debug]|r Type: |cffffffff%s|r", tostring(itemType)))
         tooltip:AddLine(string.format("|cff00ffff[Debug]|r Sub: |cffffffff%s|r", tostring(subType)))
-
+        
         local trackedSkills = {
-            "Латные доспехи", "Кольчужные доспехи", "Кожаные доспехи",
-            "Щит", "Арбалеты", "Двуручные мечи", "Двуручное дробящее оружие",
-            "Двуручные топоры", "Древковое оружие", "Кинжалы", "Кистевое",
-            "Луки", "Метательное оружие", "Мечи", "Огнестрельное оружие",
+            "Латные доспехи", "Кольчужные доспехи", "Кожаные доспехи", 
+            "Щит", "Арбалеты", "Двуручные мечи", "Двуручное дробящее оружие", 
+            "Двуручные топоры", "Древковое оружие", "Кинжалы", "Кистевое", 
+            "Луки", "Метательное оружие", "Мечи", "Огнестрельное оружие", 
             "Дробящее оружие", "Посохи", "Жезлы", "Топоры", "Рыбная ловля"
         }
-
+        
         local known = {}
-        -- Определяем навык текущего предмета
-        local currentSkill = nil
-
-        -- Для оружия используем словарь
-        if itemType == "Оружие" then
-            currentSkill = subTypeToSkill[subType]
-        -- Для доспехов проверяем по subType
-        elseif itemType == "Доспехи" then
-            if subType == "Щиты" then
-                currentSkill = "Щит"
-            elseif subType == "Латные" then
-                currentSkill = "Латные доспехи"
-            elseif subType == "Кольчужные" then
-                currentSkill = "Кольчужные доспехи"
-            elseif subType == "Кожаные" then
-                currentSkill = "Кожаные доспехи"
-            end
-        end
-
         for _, skill in ipairs(trackedSkills) do
             if AEB.knownSkills[skill] then
-                -- Подсвечиваем золотистым только навык, который точно соответствует предмету
-                if skill == currentSkill then
-                    table.insert(known, "|cffffd700" .. skill .. "|r")
-                else
-                    table.insert(known, "|cffaaaaaa" .. skill .. "|r")
-                end
+                table.insert(known, skill)
             end
         end
-
+        
         if #known > 0 then
-            tooltip:AddLine("|cff00ffff[Debug]|r Навыки: " .. table.concat(known, ", "), 1, 1, 1, true)
+            tooltip:AddLine("|cff00ffff[Debug]|r Навыки: |cffaaaaaa" .. table.concat(known, ", ") .. "|r", 1, 1, 1, true)
         else
             tooltip:AddLine("|cff00ffff[Debug]|r Навыки: |cffaaaaaaНет отслеживаемых|r")
         end
-
+        
         tooltip:Show()
     end
     -- ================
