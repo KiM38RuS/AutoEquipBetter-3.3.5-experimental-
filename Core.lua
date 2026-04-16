@@ -1,4 +1,4 @@
--- Аддон AutoEquipBetter v0.11.3a для World of Warcraft 3.3.5a
+-- Аддон AutoEquipBetter v0.11.4a для World of Warcraft 3.3.5a
 --== Важная информация: ==--
 -- Для определения возможности надеть предмет на персонажа нельзя использовать функцию IsUsableItem и поиск красного цвета в тексте подсказки, потому что это не даёт нужного результата. Для точного определения типа и подтипа оружия и брони нужно использовать GetItemInfo(id), а для определения возможности надевания - чтение оружейных и доспеховых навыков персонажа.
 -- Координаты стрелок относительно иконок и другие подобные визуальные элементы менять не нужно без явного указания. Я настроил их вручную.
@@ -7,7 +7,7 @@ local AEB = LibStub("AceAddon-3.0"):NewAddon("AutoEquipBetter", "AceEvent-3.0", 
 local scanner = CreateFrame("GameTooltip", "AEBScanner", nil, "GameTooltipTemplate")
 scanner:SetOwner(WorldFrame, "ANCHOR_NONE")
 
-local AEB_DEBUG_MODE = 1 -- Дебаггер, показывает в тултипе точный внутренний itemType и subType.
+AEB_DEBUG_MODE = 1 -- Дебаггер (глобальная переменная)
 
 -- Веса характеристик: [Класс] -> [Ветка талантов (1, 2, 3)]
 local classStatWeights = {
@@ -283,12 +283,17 @@ local bagUpdatePending = false
 local enterWorldTimer = 0
 local enterWorldPending = false
 
+-- Переменные для квестовых стрелок (должны быть доступны глобально)
+local questRewardDelayTimer = 0
+local questRewardDelayPending = false
+local isShowingQuestRewards = false
+
 local updateFrame = CreateFrame("Frame")
 updateFrame:SetScript("OnUpdate", function(self, elapsed)
     -- Обработка обновления стрелок
     if isDirty then
         updateTimer = updateTimer + elapsed
-        if updateTimer > 0.3 then
+        if updateTimer > 0.05 then
             isDirty = false
             updateTimer = 0
             AEB:RefreshArrows()
@@ -341,7 +346,9 @@ function AEB:OnInitialize()
     self:RegisterEvent("MERCHANT_CLOSED")
     self:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 	self:RegisterEvent("TRADE_SKILL_SHOW")
+    self:RegisterEvent("QUEST_DETAIL")
     self:RegisterEvent("QUEST_COMPLETE")
+    self:RegisterEvent("QUEST_FINISHED")
     self:RegisterEvent("PLAYER_ENTERING_WORLD")
     -- Подписываемся на смену талантов (срабатывает и при логине, и при смене спека)
     self:RegisterEvent("PLAYER_TALENT_UPDATE", "UpdateStatWeights")
@@ -352,9 +359,160 @@ function AEB:OnInitialize()
     -- Реагируем на прокрутку окон сумок и торговца
     hooksecurefunc("MerchantFrame_Update", function() isDirty = true end)
     hooksecurefunc("ContainerFrame_Update", function() isDirty = true end)
-    -- Реагируем на отрисовку наград за задания во всех окнах
-    hooksecurefunc("QuestInfo_Display", function() isDirty = true end)
-    hooksecurefunc("QuestInfo_ShowRewards", function() AEB:UpdateQuestIcons() end)
+    -- Хук на QuestInfo_ShowRewards с защитой от рекурсии
+    -- Устанавливаем хук после загрузки UI квестов
+    local questHookInstalled = false
+
+    local questRewardDelayFrame = CreateFrame("Frame")
+    questRewardDelayFrame:SetScript("OnUpdate", function(self, elapsed)
+        if questRewardDelayPending then
+            questRewardDelayTimer = questRewardDelayTimer + elapsed
+            -- Уменьшенная задержка для более быстрого отклика
+            if questRewardDelayTimer > 0.1 then
+                questRewardDelayPending = false
+                questRewardDelayTimer = 0
+                AEB:UpdateQuestRewardsArrows()
+                isShowingQuestRewards = false
+            end
+        end
+    end)
+
+    -- Функция установки хука
+    local function InstallQuestHook()
+        if questHookInstalled then return end
+        questHookInstalled = true
+
+        hooksecurefunc("QuestInfo_ShowRewards", function()
+            if isShowingQuestRewards then return end
+            isShowingQuestRewards = true
+            questRewardDelayPending = true
+            questRewardDelayTimer = 0
+        end)
+
+        -- Хук на выбор квеста в журнале
+        hooksecurefunc("QuestLog_SetSelection", function(questIndex)
+            if QuestLogFrame and QuestLogFrame:IsVisible() and questIndex and questIndex > 0 then
+                -- Очищаем старые стрелки перед показом новых
+                AEB:ClearQuestRewardMarkers()
+                questRewardDelayPending = true
+                questRewardDelayTimer = 0
+            end
+        end)
+
+        -- Хук на обновление деталей квеста (для клика на квест в Quest Watch)
+        hooksecurefunc("QuestLog_UpdateQuestDetails", function()
+            -- Проверяем оба окна: журнал квестов и окно деталей из трекера
+            local isQuestLogVisible = QuestLogFrame and QuestLogFrame:IsVisible()
+            local isDetailFrameVisible = QuestLogDetailFrame and QuestLogDetailFrame:IsVisible()
+
+            if isQuestLogVisible or isDetailFrameVisible then
+                local selectedQuest = GetQuestLogSelection()
+                if selectedQuest and selectedQuest > 0 then
+                    questRewardDelayPending = true
+                    questRewardDelayTimer = 0
+                end
+            end
+        end)
+    end
+
+    -- Устанавливаем хук сразу
+    InstallQuestHook()
+
+    -- Отслеживаем закрытие окон квестов через OnHide
+    if QuestFrame then
+        QuestFrame:HookScript("OnHide", function()
+            AEB:ClearQuestRewardMarkers()
+        end)
+        -- Хук на показ окна "Детали задания"
+        QuestFrame:HookScript("OnShow", function()
+            questRewardDelayPending = true
+            questRewardDelayTimer = 0
+        end)
+    end
+    if QuestLogFrame then
+        QuestLogFrame:HookScript("OnHide", function()
+            AEB:ClearQuestRewardMarkers()
+        end)
+    end
+    if QuestLogDetailFrame then
+        QuestLogDetailFrame:HookScript("OnHide", function()
+            AEB:ClearQuestRewardMarkers()
+        end)
+    end
+
+    -- И также при открытии журнала квестов (на случай если UI грузится по требованию)
+    self:RegisterEvent("QUEST_LOG_UPDATE")
+    local questLogHooked = false
+    local lastQuestLogSelection = nil
+    self.QUEST_LOG_UPDATE = function()
+        if not questLogHooked and QuestLogFrame then
+            questLogHooked = true
+            InstallQuestHook()
+        end
+
+        -- Дополнительно: обновляем стрелки при изменении выбранного квеста в журнале
+        if QuestLogFrame and QuestLogFrame:IsVisible() then
+            local selectedQuest = GetQuestLogSelection()
+            if selectedQuest ~= lastQuestLogSelection and selectedQuest > 0 then
+                lastQuestLogSelection = selectedQuest
+                if not AEB_DebugLog then AEB_DebugLog = {} end
+                table.insert(AEB_DebugLog, "QUEST_LOG_UPDATE: selectedQuest = " .. selectedQuest)
+                -- Задержка для обновления UI
+                questRewardDelayPending = true
+                questRewardDelayTimer = 0
+            end
+        end
+    end
+
+    -- Реагируем на клик по награде - восстанавливаем стрелки после клика
+    local restoreTimer = 0
+    local needRestore = false
+    hooksecurefunc("QuestInfoItem_OnClick", function(self)
+        if AEB_DEBUG_MODE == 1 then
+            print("QuestInfoItem_OnClick хук сработал, запланировано восстановление стрелок")
+        end
+        needRestore = true
+        restoreTimer = 0
+    end)
+
+    -- Добавляем обработчик для восстановления стрелок
+    local restoreFrame = CreateFrame("Frame")
+    restoreFrame:SetScript("OnUpdate", function(self, elapsed)
+        if needRestore then
+            restoreTimer = restoreTimer + elapsed
+            if restoreTimer > 0.1 then
+                needRestore = false
+                restoreTimer = 0
+                if AEB_DEBUG_MODE == 1 then
+                    print("Восстанавливаем стрелки после клика")
+                end
+                -- Показываем стрелки заново
+                for _, arrow in ipairs(upgradeArrows) do
+                    if arrow.isQuestReward then
+                        if AEB_DEBUG_MODE == 1 then
+                            local parent = arrow:GetParent()
+                            local parentName = parent and parent:GetName() or "nil"
+                            print("Стрелка: parent =", parentName, "isShown =", arrow:IsShown(), "inUse =", arrow.inUse)
+                        end
+                        -- Проверяем, есть ли у стрелки точки привязки
+                        local numPoints = arrow:GetNumPoints()
+                        if numPoints == 0 then
+                            if AEB_DEBUG_MODE == 1 then
+                                print("У стрелки нет точек привязки! Восстанавливаем...")
+                            end
+                            -- Находим кнопку с лучшим апгрейдом и привязываем заново
+                            AEB:UpdateQuestRewardsArrows()
+                        else
+                            arrow:Show()
+                            if AEB_DEBUG_MODE == 1 then
+                                print("Стрелка восстановлена через Show()")
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
 
     -- Определяем класс игрока и загружаем его веса
     local _, playerClass = UnitClass("player")
@@ -373,6 +531,30 @@ function AEB:OnInitialize()
 
     -- Сообщение при запуске
     print("|cff00ff00AutoEquipBetter|r запущен. Введите |cffffcc00/aeb|r для открытия окна настроек")
+    print("|cffff0000DEBUG: AEB_DEBUG_MODE = " .. tostring(AEB_DEBUG_MODE) .. "|r")
+
+    -- DEBUG: Показывать имя фрейма под курсором
+    if AEB_DEBUG_MODE == 1 then
+        print("|cffff0000DEBUG: Создаём debug frame|r")
+        local debugFrame = CreateFrame("Frame", "AEBDebugFrameTest", UIParent)
+        debugFrame:SetFrameStrata("TOOLTIP")
+        debugFrame:SetFrameLevel(9999)
+        debugFrame:SetWidth(200)
+        debugFrame:SetHeight(30)
+        debugFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+
+        local bg = debugFrame:CreateTexture(nil, "BACKGROUND")
+        bg:SetAllPoints()
+        bg:SetTexture(0, 0, 0, 0.8)
+
+        local text = debugFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        text:SetPoint("CENTER")
+        text:SetTextColor(1, 1, 0)
+        text:SetText("DEBUG FRAME TEST")
+
+        debugFrame:Show()
+        print("|cffff0000DEBUG: Frame создан и показан|r")
+    end
 end
 
 function AEB:BAG_UPDATE()
@@ -428,6 +610,7 @@ function AEB:ReleaseAllArrows()
         arrow:Hide()
         arrow:ClearAllPoints()
         arrow.inUse = false
+        arrow.isQuestReward = nil
     end
 end
 
@@ -458,6 +641,7 @@ function AEB:ReleaseAllCoins()
         coin:Hide()
         coin:ClearAllPoints()
         coin.inUse = false
+        coin.isQuestReward = nil
     end
 end
 
@@ -831,10 +1015,12 @@ function AEB:RefreshArrows()
                     if (not minLvl or minLvl <= UnitLevel("player")) and self:CanPlayerWear(itemType, subType) then
                         local score = self:GetScoreForLink(link)
                         local isUp, newS = self:GetUpgradeInfo(link, loc, score)
-                        
+
                         if isUp then
-                            if not bestMerchant[loc] or newS > (bestMerchant[loc].newS or 0) then
-                                bestMerchant[loc] = { index = i, score = score, loc = loc, newS = newS }
+                            local slotId = equipSlotMap[loc]
+                            -- Сравниваем между собой предметы для одного слота
+                            if not bestMerchant[slotId] or newS > bestMerchant[slotId].newS then
+                                bestMerchant[slotId] = { index = i, score = score, loc = loc, newS = newS }
                             end
                         end
                     end
@@ -842,7 +1028,7 @@ function AEB:RefreshArrows()
             end
         end
     end
-    
+
     for loc, data in pairs(bestBags) do
         local btn = self:GetContainerButton(data.bag, data.slot)
         if btn and btn:IsVisible() then
@@ -851,7 +1037,7 @@ function AEB:RefreshArrows()
             arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 5, -3)
             arrow:Show()
         end
-        
+
         local alreadyInQueue = false
         for _, q in ipairs(itemQueue) do if q.id == data.id then alreadyInQueue = true end end
         if not alreadyInQueue then
@@ -867,10 +1053,10 @@ function AEB:RefreshArrows()
             end
         end
     end
-    
+
     local startIdx = ((MerchantFrame.page or 1) - 1) * MERCHANT_ITEMS_PER_PAGE + 1
     local endIdx = startIdx + MERCHANT_ITEMS_PER_PAGE - 1
-    for loc, data in pairs(bestMerchant) do
+    for slotId, data in pairs(bestMerchant) do
         if data.index >= startIdx and data.index <= endIdx then
             local btnIdx = data.index - startIdx + 1
             local btn = _G["MerchantItem"..btnIdx.."ItemButton"]
@@ -879,75 +1065,6 @@ function AEB:RefreshArrows()
                 arrow:SetParent(btn)
                 arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 5, -3)
                 arrow:SetFrameLevel(btn:GetFrameLevel() + 5)
-                arrow:Show()
-            end
-        end
-    end
-    -- === АНАЛИЗ НАГРАД ЗА ЗАДАНИЯ ===
-    if QuestInfoFrame and QuestInfoFrame:IsVisible() then
-        local isQuestLog = QuestInfoFrame.questLog
-        local numChoices = isQuestLog and GetNumQuestLogChoices() or GetNumQuestChoices()
-
-        local bestUpgradeIdx = nil
-        local bestUpgradePct = 0
-        local bestValueIdx = nil
-        local bestValue = -1
-
-        for i = 1, numChoices do
-            -- В зависимости от окна используем нужную функцию API
-            local link = isQuestLog and GetQuestLogItemLink("choice", i) or GetQuestItemLink("choice", i)
-            if link then
-                local _, _, _, _, _, itemType, subType, _, loc, _, itemSellPrice = GetItemInfo(link)
-                local quantity = 1
-                
-                if isQuestLog then
-                    _, _, quantity = GetQuestLogChoiceInfo(i)
-                else
-                    _, _, quantity = GetQuestItemInfo("choice", i)
-                end
-                
-                local totalValue = (itemSellPrice or 0) * (quantity or 1)
-                if totalValue > bestValue then
-                    bestValue = totalValue
-                    bestValueIdx = i
-                end
-
-                if IsEquippableItem(link) and loc and equipSlotMap[loc] then
-                    -- Я добавил проверку CanPlayerWear, чтобы магу случайно не предложили латы с хорошими статами
-                    if self:CanPlayerWear(itemType, subType) then
-                        local score = self:GetScoreForLink(link)
-                        local isUp, newS, oldS = self:GetUpgradeInfo(link, loc, score)
-
-                        if isUp then
-                            local pct = oldS == 0 and 100 or math.floor(((newS - oldS) / newS) * 100)
-                            if pct > 100 then pct = 100 end
-                            if pct < 1 then pct = 1 end
-                            if pct > bestUpgradePct then
-                                bestUpgradePct = pct
-                                bestUpgradeIdx = i
-                            end
-                        end
-                    end
-                end
-            end
-        end
-
-        if bestValueIdx then
-            local btn = _G["QuestInfoItem" .. bestValueIdx]
-            if btn and btn:IsVisible() then
-                local coin = self:GetCoinFrame()
-                coin:SetParent(btn)
-                coin:SetPoint("TOPRIGHT", btn, "TOPRIGHT", -2, -2)
-                coin:Show()
-            end
-        end
-
-        if bestUpgradeIdx then
-            local btn = _G["QuestInfoItem" .. bestUpgradeIdx]
-            if btn and btn:IsVisible() then
-                local arrow = self:GetArrowFrame()
-                arrow:SetParent(btn)
-                arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 5, -3)
                 arrow:Show()
             end
         end
@@ -1271,32 +1388,53 @@ function AEB:UpdateTradeSkillArrow(id)
 end
 
 -- === АНАЛИЗ НАГРАД ЗА ЗАДАНИЯ ===
-function AEB:UpdateQuestIcons()
-    -- Очищаем только квестовые стрелочки и монетки, чтобы не затронуть сумки
+-- Отдельная функция для обновления стрелок на квестовых наградах
+local isUpdatingQuestArrows = false
+function AEB:UpdateQuestRewardsArrows()
+    -- Защита от рекурсии
+    if isUpdatingQuestArrows then return end
+    isUpdatingQuestArrows = true
+
+    -- Очищаем только квестовые стрелочки и монетки
     for _, arrow in ipairs(upgradeArrows) do
-        if arrow.inUse and arrow:GetParent() and arrow:GetParent():GetName() and arrow:GetParent():GetName():find("QuestInfoItem") then
-            arrow:Hide()
-            arrow:ClearAllPoints()
+        if arrow.inUse and arrow.isQuestReward then
             arrow.inUse = false
         end
     end
     for _, coin in ipairs(coinIcons) do
-        if coin.inUse and coin:GetParent() and coin:GetParent():GetName() and coin:GetParent():GetName():find("QuestInfoItem") then
-            coin:Hide()
-            coin:ClearAllPoints()
+        if coin.inUse and coin.isQuestReward then
             coin.inUse = false
         end
     end
 
     local numChoices = 0
     local isLog = QuestInfoFrame.questLog
+    local isQuestDetail = QuestFrame and QuestFrame:IsVisible() -- Окно принятия задания от NPC
+    local isQuestLogDetail = QuestLogDetailFrame and QuestLogDetailFrame:IsVisible() -- Окно из трекера
+
+    -- Если открыт QuestLogDetailFrame, это тоже считается как журнал квестов
+    if isQuestLogDetail then
+        isLog = true
+    end
+
+    -- DEBUG: выводим состояние окон
+    if AEB_DEBUG_MODE == 1 then
+        print("=== UpdateQuestRewardsArrows ===")
+        print("isLog:", isLog)
+        print("isQuestDetail:", isQuestDetail)
+        print("isQuestLogDetail:", isQuestLogDetail)
+    end
+
     if isLog then
         numChoices = GetNumQuestLogChoices()
     else
         numChoices = GetNumQuestChoices()
     end
 
-    if numChoices <= 0 then return end
+    if numChoices <= 0 then
+        isUpdatingQuestArrows = false
+        return
+    end
 
     local bestUpgradeIdx = nil
     local bestUpgradePct = 0
@@ -1313,18 +1451,17 @@ function AEB:UpdateQuestIcons()
             else
                 _, _, quantity = GetQuestItemInfo("choice", i)
             end
-            
+
             local totalValue = (itemSellPrice or 0) * (quantity or 1)
             if totalValue > bestValue then
                 bestValue = totalValue
                 bestValueIdx = i
             end
 
-            -- Заодно добавил проверку CanPlayerWear, чтобы аддон не предлагал награды, которые нельзя надеть
             if IsEquippableItem(link) and loc and equipSlotMap[loc] and self:CanPlayerWear(itemType, subType) then
                 local score = self:GetScoreForLink(link)
                 local isUp, newS, oldS = self:GetUpgradeInfo(link, loc, score)
-                
+
                 if isUp then
                     local pct = oldS == 0 and 100 or math.floor(((newS - oldS) / newS) * 100)
                     if pct > 100 then pct = 100 end
@@ -1340,10 +1477,12 @@ function AEB:UpdateQuestIcons()
 
     if bestValueIdx then
         local btn = _G["QuestInfoItem" .. bestValueIdx]
-        if btn and btn:IsVisible() then
+        -- Показываем монетку только если это НЕ тот же предмет, что и с апгрейд-маркером
+        if btn and btn:IsVisible() and bestUpgradeIdx ~= bestValueIdx then
             local coin = self:GetCoinFrame()
             coin:SetParent(btn)
             coin:SetPoint("TOPRIGHT", btn, "TOPRIGHT", -2, -2)
+            coin.isQuestReward = true
             coin:Show()
         end
     end
@@ -1352,17 +1491,95 @@ function AEB:UpdateQuestIcons()
         local btn = _G["QuestInfoItem" .. bestUpgradeIdx]
         if btn and btn:IsVisible() then
             local arrow = self:GetArrowFrame()
-            arrow:SetParent(btn)
-            arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 5, -3)
-            arrow:SetFrameLevel(btn:GetFrameLevel() + 5)
+
+            -- Разное позиционирование в зависимости от типа окна
+            if isLog or isQuestLogDetail then
+                -- В журнале квестов и окне деталей из трекера - привязываем к иконке
+                local icon = _G["QuestInfoItem" .. bestUpgradeIdx .. "IconTexture"] or btn.Icon
+
+                if icon then
+                    arrow:SetParent(btn)
+                    arrow:SetFrameStrata("HIGH")
+                    arrow:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", 5, -3)
+                    arrow:SetFrameLevel(btn:GetFrameLevel() + 5)
+                else
+                    arrow:SetParent(btn)
+                    arrow:SetFrameStrata("HIGH")
+                    arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 5, -3)
+                    arrow:SetFrameLevel(btn:GetFrameLevel() + 5)
+                end
+            elseif isQuestDetail then
+                -- В окне принятия задания - привязываем к иконке, но внутри скролла
+                local icon = _G["QuestInfoItem" .. bestUpgradeIdx .. "IconTexture"] or btn.Icon
+
+                if icon then
+                    arrow:SetParent(btn)
+                    arrow:SetFrameStrata("MEDIUM")
+                    arrow:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", 5, -3)
+                    arrow:SetFrameLevel(btn:GetFrameLevel() + 5)
+                else
+                    arrow:SetParent(btn)
+                    arrow:SetFrameStrata("MEDIUM")
+                    arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 5, -3)
+                    arrow:SetFrameLevel(btn:GetFrameLevel() + 5)
+                end
+            else
+                -- В окне сдачи квеста (QUEST_COMPLETE) - привязываем к UIParent
+                arrow:SetParent(UIParent)
+                arrow:SetFrameStrata("TOOLTIP")
+                arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMLEFT", 42, -2)
+                arrow:SetFrameLevel(999)
+            end
+
+            arrow.isQuestReward = true
             arrow:Show()
         end
     end
 
-    return bestUpgradeIdx, bestValueIdx
+    -- Снимаем флаг защиты от рекурсии
+    isUpdatingQuestArrows = false
 end
 
 -- === АВТОМАТИЧЕСКИЙ ВЫБОР НАГРАДЫ У NPC ===
+function AEB:ClearQuestRewardMarkers()
+    -- Очистка квестовых стрелок и монеток
+    for _, arrow in ipairs(upgradeArrows) do
+        if arrow.isQuestReward then
+            arrow:Hide()
+            arrow:ClearAllPoints()
+            arrow.inUse = false
+            arrow.isQuestReward = nil
+        end
+    end
+    for _, coin in ipairs(coinIcons) do
+        if coin.isQuestReward then
+            coin:Hide()
+            coin:ClearAllPoints()
+            coin.inUse = false
+            coin.isQuestReward = nil
+        end
+    end
+end
+
+function AEB:QUEST_DETAIL()
+    -- Событие при открытии окна "Детали задания" (клик на квест в Quest Watch)
+    if AEB_DEBUG_MODE == 1 then
+        print("=== QUEST_DETAIL event fired ===")
+        print("QuestFrame visible:", QuestFrame and QuestFrame:IsVisible())
+        print("QuestLogDetailFrame exists:", QuestLogDetailFrame ~= nil)
+        if QuestLogDetailFrame then
+            print("QuestLogDetailFrame visible:", QuestLogDetailFrame:IsVisible())
+        end
+    end
+    questRewardDelayPending = true
+    questRewardDelayTimer = 0
+end
+
+function AEB:QUEST_FINISHED()
+    -- Событие при закрытии окна квеста
+    self:ClearQuestRewardMarkers()
+end
+
 function AEB:QUEST_COMPLETE()
     local numChoices = GetNumQuestChoices()
     if numChoices <= 0 then return end
@@ -1377,7 +1594,7 @@ function AEB:QUEST_COMPLETE()
         if link then
             local _, _, _, _, _, itemType, subType, _, loc, _, itemSellPrice = GetItemInfo(link)
             local _, _, quantity = GetQuestItemInfo("choice", i)
-            
+
             local totalValue = (itemSellPrice or 0) * (quantity or 1)
             if totalValue > bestValue then
                 bestValue = totalValue
@@ -1403,6 +1620,34 @@ function AEB:QUEST_COMPLETE()
         end
     end
 
+    -- Показываем стрелки и монетки ПЕРЕД автоматическим кликом
+    -- Монетку показываем только если это НЕ тот же предмет, что и с апгрейд-маркером
+    if bestValueIdx and bestUpgradeIdx ~= bestValueIdx then
+        local btn = _G["QuestInfoItem" .. bestValueIdx]
+        if btn and btn:IsVisible() then
+            local coin = self:GetCoinFrame()
+            coin:SetParent(btn)
+            coin:SetPoint("TOPRIGHT", btn, "TOPRIGHT", -2, -2)
+            coin.isQuestReward = true
+            coin:Show()
+        end
+    end
+
+    if bestUpgradeIdx then
+        local btn = _G["QuestInfoItem" .. bestUpgradeIdx]
+        if btn and btn:IsVisible() then
+            local arrow = self:GetArrowFrame()
+            -- QUEST_COMPLETE всегда срабатывает в окне NPC (не в журнале)
+            arrow:SetParent(UIParent)
+            arrow:SetFrameStrata("TOOLTIP")
+            arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMLEFT", 42, -2)
+            arrow:SetFrameLevel(999)
+            arrow.isQuestReward = true
+            arrow:Show()
+        end
+    end
+
+    -- Автоматический клик на лучшую награду
     local clickIdx = bestUpgradeIdx or bestValueIdx
     if clickIdx then
         local btn = _G["QuestInfoItem" .. clickIdx]

@@ -2,7 +2,7 @@
 ## Title: AutoEquipBetter
 ## Notes: Анализ и сравнение экипировки.
 ## Author: KiM38RuS
-## Version: 0.11.3a
+## Version: 0.11.4a
 ## SavedVariables: AutoEquipBetterDB, AEB_DebugLog
 
 embeds.xml
