@@ -267,7 +267,9 @@ local defaultSettings = {
     autoEquip = false,
     delay = 1,
     framePos = { point = "CENTER", x = 0, y = 0 },
-    blacklist = {}
+    blacklist = {},
+    autoEquipAmmo = false,
+    ammoBestQuality = true
 }
 
 local itemQueue = {}
@@ -322,6 +324,56 @@ updateFrame:SetScript("OnUpdate", function(self, elapsed)
         end
     end
 end)
+
+-- === ФУНКЦИИ ДЛЯ РАБОТЫ С БОЕПРИПАСАМИ ===
+local AMMOSLOT = 0
+
+function AEB:FindBestAmmo()
+    local bestAmmo = nil
+    local bestQuality = -1
+
+    for bag = 0, 4 do
+        for slot = 1, GetContainerNumSlots(bag) do
+            local itemLink = GetContainerItemLink(bag, slot)
+            if itemLink then
+                local _, _, quality, _, _, itemType = GetItemInfo(itemLink)
+                if itemType == "Projectile" then
+                    -- Если включен приоритет качества, выбираем лучшее
+                    if self.db.ammoBestQuality then
+                        if quality and quality > bestQuality then
+                            bestQuality = quality
+                            bestAmmo = {bag = bag, slot = slot, link = itemLink, quality = quality}
+                        end
+                    else
+                        -- Иначе берем первые попавшиеся
+                        return {bag = bag, slot = slot, link = itemLink, quality = quality}
+                    end
+                end
+            end
+        end
+    end
+
+    return bestAmmo
+end
+
+function AEB:EquipBestAmmo()
+    if not self.db.autoEquipAmmo then
+        return
+    end
+
+    local ammo = self:FindBestAmmo()
+    if ammo then
+        -- Проверяем, не экипированы ли уже эти боеприпасы
+        local equippedLink = GetInventoryItemLink("player", AMMOSLOT)
+        if equippedLink ~= ammo.link then
+            PickupContainerItem(ammo.bag, ammo.slot)
+            EquipCursorItem(AMMOSLOT)
+            if AEB_DEBUG_MODE == 1 then
+                print("|cff00ff00[AutoEquipBetter]|r Экипированы боеприпасы: " .. ammo.link)
+            end
+        end
+    end
+end
 
 function AEB:OnInitialize()
     -- Инициализация SavedVariables
@@ -441,7 +493,6 @@ function AEB:OnInitialize()
     end
 
     -- И также при открытии журнала квестов (на случай если UI грузится по требованию)
-    self:RegisterEvent("QUEST_LOG_UPDATE")
     local questLogHooked = false
     local lastQuestLogSelection = nil
     self.QUEST_LOG_UPDATE = function()
@@ -464,16 +515,20 @@ function AEB:OnInitialize()
         end
     end
 
+    self:RegisterEvent("QUEST_LOG_UPDATE")
+
     -- Реагируем на клик по награде - восстанавливаем стрелки после клика
     local restoreTimer = 0
     local needRestore = false
-    hooksecurefunc("QuestInfoItem_OnClick", function(self)
-        if AEB_DEBUG_MODE == 1 then
-            print("QuestInfoItem_OnClick хук сработал, запланировано восстановление стрелок")
-        end
-        needRestore = true
-        restoreTimer = 0
-    end)
+    if QuestInfoItem_OnClick then
+        hooksecurefunc("QuestInfoItem_OnClick", function(self)
+            if AEB_DEBUG_MODE == 1 then
+                print("QuestInfoItem_OnClick хук сработал, запланировано восстановление стрелок")
+            end
+            needRestore = true
+            restoreTimer = 0
+        end)
+    end
 
     -- Добавляем обработчик для восстановления стрелок
     local restoreFrame = CreateFrame("Frame")
@@ -521,7 +576,7 @@ function AEB:OnInitialize()
     -- Регистрация команды /aeb
     SLASH_AUTOEQUIPBETTER1 = "/aeb"
     SlashCmdList["AUTOEQUIPBETTER"] = function(msg)
-        msg = msg:lower():trim()
+        msg = strtrim(msg:lower())
         if msg == "equip" then
             AEB:CheckAndSuggestUpgrades()
         else
@@ -531,30 +586,6 @@ function AEB:OnInitialize()
 
     -- Сообщение при запуске
     print("|cff00ff00AutoEquipBetter|r запущен. Введите |cffffcc00/aeb|r для открытия окна настроек")
-    print("|cffff0000DEBUG: AEB_DEBUG_MODE = " .. tostring(AEB_DEBUG_MODE) .. "|r")
-
-    -- DEBUG: Показывать имя фрейма под курсором
-    if AEB_DEBUG_MODE == 1 then
-        print("|cffff0000DEBUG: Создаём debug frame|r")
-        local debugFrame = CreateFrame("Frame", "AEBDebugFrameTest", UIParent)
-        debugFrame:SetFrameStrata("TOOLTIP")
-        debugFrame:SetFrameLevel(9999)
-        debugFrame:SetWidth(200)
-        debugFrame:SetHeight(30)
-        debugFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-
-        local bg = debugFrame:CreateTexture(nil, "BACKGROUND")
-        bg:SetAllPoints()
-        bg:SetTexture(0, 0, 0, 0.8)
-
-        local text = debugFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-        text:SetPoint("CENTER")
-        text:SetTextColor(1, 1, 0)
-        text:SetText("DEBUG FRAME TEST")
-
-        debugFrame:Show()
-        print("|cffff0000DEBUG: Frame создан и показан|r")
-    end
 end
 
 function AEB:BAG_UPDATE()
@@ -565,11 +596,18 @@ function AEB:BAG_UPDATE()
         bagUpdateTimer = 0
         bagUpdatePending = true
     end
+
+    -- Автоэкипировка боеприпасов
+    self:EquipBestAmmo()
 end
 function AEB:MERCHANT_SHOW() isDirty = true end
 function AEB:MERCHANT_UPDATE() isDirty = true end
 function AEB:MERCHANT_CLOSED() isDirty = true; self:ReleaseAllArrows() end
-function AEB:PLAYER_EQUIPMENT_CHANGED() isDirty = true end
+function AEB:PLAYER_EQUIPMENT_CHANGED()
+    isDirty = true
+    -- Автоэкипировка боеприпасов при смене оружия
+    self:EquipBestAmmo()
+end
 function AEB:PLAYER_ENTERING_WORLD()
     -- Запуск проверки при входе в мир с задержкой
     enterWorldTimer = 0
@@ -1813,10 +1851,20 @@ function AEB:ShowSettingsFrame()
     -- === ВКЛАДКА "ОБЩИЕ" ===
     local generalTab = CreateTab("Общие", 1)
 
+    -- Создаем ScrollFrame для прокручиваемого контента
+    local scrollFrame = CreateFrame("ScrollFrame", nil, generalTab, "UIPanelScrollFrameTemplate")
+    scrollFrame:SetPoint("TOPLEFT", 5, -5)
+    scrollFrame:SetPoint("BOTTOMRIGHT", -25, 5)
+
+    -- Создаем ScrollChild (контент, который будет прокручиваться)
+    local scrollChild = CreateFrame("Frame", nil, scrollFrame)
+    scrollChild:SetSize(scrollFrame:GetWidth() - 10, 600) -- Высота больше для прокрутки
+    scrollFrame:SetScrollChild(scrollChild)
+
     local yOffset = -5
 
     -- Чекбокс "Включить автоматическое сравнение"
-    local cbAutoSuggest = CreateFrame("CheckButton", nil, generalTab, "UICheckButtonTemplate")
+    local cbAutoSuggest = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
     cbAutoSuggest:SetSize(20, 20)
     cbAutoSuggest:SetPoint("TOPLEFT", 2, yOffset)
     cbAutoSuggest:SetChecked(self.db.autoSuggest)
@@ -1830,7 +1878,7 @@ function AEB:ShowSettingsFrame()
     yOffset = yOffset - 30
 
     -- Чекбокс "Надевать автоматически"
-    local cbAutoEquip = CreateFrame("CheckButton", nil, generalTab, "UICheckButtonTemplate")
+    local cbAutoEquip = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
     cbAutoEquip:SetSize(20, 20)
     cbAutoEquip:SetPoint("TOPLEFT", 2, yOffset)
     cbAutoEquip:SetChecked(self.db.autoEquip)
@@ -1844,11 +1892,11 @@ function AEB:ShowSettingsFrame()
     yOffset = yOffset - 30
 
     -- Задержка автоэкипировки
-    local delayLabel = generalTab:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    local delayLabel = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     delayLabel:SetPoint("TOPLEFT", 2, yOffset)
     delayLabel:SetText("Задержка автоэкипировки (сек):")
 
-    local delayInput = CreateFrame("EditBox", nil, generalTab, "InputBoxTemplate")
+    local delayInput = CreateFrame("EditBox", nil, scrollChild, "InputBoxTemplate")
     delayInput:SetSize(60, 30)
     delayInput:SetPoint("LEFT", delayLabel, "RIGHT", 10, 0)
     delayInput:SetAutoFocus(false)
@@ -1866,11 +1914,11 @@ function AEB:ShowSettingsFrame()
     yOffset = yOffset - 30
 
     -- Расположение окна
-    local posLabel = generalTab:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    local posLabel = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     posLabel:SetPoint("TOPLEFT", 2, yOffset)
     posLabel:SetText("Расположение окна:")
 
-    local btnChangePos = CreateFrame("Button", nil, generalTab, "UIPanelButtonTemplate")
+    local btnChangePos = CreateFrame("Button", nil, scrollChild, "UIPanelButtonTemplate")
     btnChangePos:SetSize(100, 25)
     btnChangePos:SetPoint("LEFT", posLabel, "RIGHT", 10, 0)
     btnChangePos:SetText("Изменить")
@@ -1883,7 +1931,7 @@ function AEB:ShowSettingsFrame()
         end
     end)
 
-    local btnResetPos = CreateFrame("Button", nil, generalTab, "UIPanelButtonTemplate")
+    local btnResetPos = CreateFrame("Button", nil, scrollChild, "UIPanelButtonTemplate")
     btnResetPos:SetSize(100, 25)
     btnResetPos:SetPoint("LEFT", btnChangePos, "RIGHT", 10, 0)
     btnResetPos:SetText("Сбросить")
@@ -1894,6 +1942,34 @@ function AEB:ShowSettingsFrame()
             mainFrame:SetPoint("CENTER")
         end
         print("|cff00ff00Позиция окна сброшена|r")
+    end)
+
+    yOffset = yOffset - 40
+
+    -- Чекбокс "Автоэкипировка боеприпасов"
+    local cbAutoEquipAmmo = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
+    cbAutoEquipAmmo:SetSize(20, 20)
+    cbAutoEquipAmmo:SetPoint("TOPLEFT", 2, yOffset)
+    cbAutoEquipAmmo:SetChecked(self.db.autoEquipAmmo)
+    cbAutoEquipAmmo.text = cbAutoEquipAmmo:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    cbAutoEquipAmmo.text:SetPoint("LEFT", cbAutoEquipAmmo, "RIGHT", 5, 0)
+    cbAutoEquipAmmo.text:SetText("Автоматически экипировать боеприпасы")
+    cbAutoEquipAmmo:SetScript("OnClick", function(self)
+        AEB.db.autoEquipAmmo = self:GetChecked()
+    end)
+
+    yOffset = yOffset - 30
+
+    -- Чекбокс "Приоритет качества боеприпасов" (дочерний)
+    local cbAmmoBestQuality = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
+    cbAmmoBestQuality:SetSize(20, 20)
+    cbAmmoBestQuality:SetPoint("TOPLEFT", 22, yOffset) -- Отступ 20px для визуальной иерархии
+    cbAmmoBestQuality:SetChecked(self.db.ammoBestQuality)
+    cbAmmoBestQuality.text = cbAmmoBestQuality:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    cbAmmoBestQuality.text:SetPoint("LEFT", cbAmmoBestQuality, "RIGHT", 5, 0)
+    cbAmmoBestQuality.text:SetText("Приоритет лучшего качества")
+    cbAmmoBestQuality:SetScript("OnClick", function(self)
+        AEB.db.ammoBestQuality = self:GetChecked()
     end)
 
     -- === ВКЛАДКА "ИСКЛЮЧЕНИЯ" ===
