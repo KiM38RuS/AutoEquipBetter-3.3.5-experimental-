@@ -368,9 +368,6 @@ function AEB:EquipBestAmmo()
         if equippedLink ~= ammo.link then
             PickupContainerItem(ammo.bag, ammo.slot)
             EquipCursorItem(AMMOSLOT)
-            if AEB_DEBUG_MODE == 1 then
-                print("|cff00ff00[AutoEquipBetter]|r Экипированы боеприпасы: " .. ammo.link)
-            end
         end
     end
 end
@@ -522,9 +519,6 @@ function AEB:OnInitialize()
     local needRestore = false
     if QuestInfoItem_OnClick then
         hooksecurefunc("QuestInfoItem_OnClick", function(self)
-            if AEB_DEBUG_MODE == 1 then
-                print("QuestInfoItem_OnClick хук сработал, запланировано восстановление стрелок")
-            end
             needRestore = true
             restoreTimer = 0
         end)
@@ -538,30 +532,16 @@ function AEB:OnInitialize()
             if restoreTimer > 0.1 then
                 needRestore = false
                 restoreTimer = 0
-                if AEB_DEBUG_MODE == 1 then
-                    print("Восстанавливаем стрелки после клика")
-                end
                 -- Показываем стрелки заново
                 for _, arrow in ipairs(upgradeArrows) do
                     if arrow.isQuestReward then
-                        if AEB_DEBUG_MODE == 1 then
-                            local parent = arrow:GetParent()
-                            local parentName = parent and parent:GetName() or "nil"
-                            print("Стрелка: parent =", parentName, "isShown =", arrow:IsShown(), "inUse =", arrow.inUse)
-                        end
                         -- Проверяем, есть ли у стрелки точки привязки
                         local numPoints = arrow:GetNumPoints()
                         if numPoints == 0 then
-                            if AEB_DEBUG_MODE == 1 then
-                                print("У стрелки нет точек привязки! Восстанавливаем...")
-                            end
                             -- Находим кнопку с лучшим апгрейдом и привязываем заново
                             AEB:UpdateQuestRewardsArrows()
                         else
                             arrow:Show()
-                            if AEB_DEBUG_MODE == 1 then
-                                print("Стрелка восстановлена через Show()")
-                            end
                         end
                     end
                 end
@@ -1455,14 +1435,6 @@ function AEB:UpdateQuestRewardsArrows()
         isLog = true
     end
 
-    -- DEBUG: выводим состояние окон
-    if AEB_DEBUG_MODE == 1 then
-        print("=== UpdateQuestRewardsArrows ===")
-        print("isLog:", isLog)
-        print("isQuestDetail:", isQuestDetail)
-        print("isQuestLogDetail:", isQuestLogDetail)
-    end
-
     if isLog then
         numChoices = GetNumQuestLogChoices()
     else
@@ -1601,14 +1573,6 @@ end
 
 function AEB:QUEST_DETAIL()
     -- Событие при открытии окна "Детали задания" (клик на квест в Quest Watch)
-    if AEB_DEBUG_MODE == 1 then
-        print("=== QUEST_DETAIL event fired ===")
-        print("QuestFrame visible:", QuestFrame and QuestFrame:IsVisible())
-        print("QuestLogDetailFrame exists:", QuestLogDetailFrame ~= nil)
-        if QuestLogDetailFrame then
-            print("QuestLogDetailFrame visible:", QuestLogDetailFrame:IsVisible())
-        end
-    end
     questRewardDelayPending = true
     questRewardDelayTimer = 0
 end
@@ -2209,60 +2173,6 @@ local function ProcessTooltip(tooltip)
     if not id or not IsEquippableItem(id) then return end
 
     local _, _, _, _, _, itemType, subType, _, loc = GetItemInfo(id)
-    
-    -- === ДЕБАГГЕР ===
-    if AEB_DEBUG_MODE == 1 then
-        tooltip:AddLine(string.format("|cff00ffff[Debug]|r Type: |cffffffff%s|r", tostring(itemType)))
-        tooltip:AddLine(string.format("|cff00ffff[Debug]|r Sub: |cffffffff%s|r", tostring(subType)))
-
-        local trackedSkills = {
-            "Латные доспехи", "Кольчужные доспехи", "Кожаные доспехи",
-            "Щит", "Арбалеты", "Двуручные мечи", "Двуручное дробящее оружие",
-            "Двуручные топоры", "Древковое оружие", "Кинжалы", "Кистевое",
-            "Луки", "Метательное оружие", "Мечи", "Огнестрельное оружие",
-            "Дробящее оружие", "Посохи", "Жезлы", "Топоры", "Рыбная ловля"
-        }
-
-        local known = {}
-        -- Определяем навык текущего предмета
-        local currentSkill = nil
-
-        -- Для оружия используем словарь
-        if itemType == "Оружие" then
-            currentSkill = subTypeToSkill[subType]
-        -- Для доспехов проверяем по subType
-        elseif itemType == "Доспехи" then
-            if subType == "Щиты" then
-                currentSkill = "Щит"
-            elseif subType == "Латные" then
-                currentSkill = "Латные доспехи"
-            elseif subType == "Кольчужные" then
-                currentSkill = "Кольчужные доспехи"
-            elseif subType == "Кожаные" then
-                currentSkill = "Кожаные доспехи"
-            end
-        end
-
-        for _, skill in ipairs(trackedSkills) do
-            if AEB.knownSkills[skill] then
-                -- Подсвечиваем золотистым только навык, который точно соответствует предмету
-                if skill == currentSkill then
-                    table.insert(known, "|cffffd700" .. skill .. "|r")
-                else
-                    table.insert(known, "|cffaaaaaa" .. skill .. "|r")
-                end
-            end
-        end
-
-        if #known > 0 then
-            tooltip:AddLine("|cff00ffff[Debug]|r Навыки: " .. table.concat(known, ", "), 1, 1, 1, true)
-        else
-            tooltip:AddLine("|cff00ffff[Debug]|r Навыки: |cffaaaaaaНет отслеживаемых|r")
-        end
-
-        tooltip:Show()
-    end
-    -- ================
 
     if not loc or not equipSlotMap[loc] then return end
 
