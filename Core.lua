@@ -1,4 +1,4 @@
--- Аддон AutoEquipBetter v0.11.4a для World of Warcraft 3.3.5a
+-- Аддон AutoEquipBetter v0.11.7a для World of Warcraft 3.3.5a
 --== Важная информация: ==--
 -- Для определения возможности надеть предмет на персонажа нельзя использовать функцию IsUsableItem и поиск красного цвета в тексте подсказки, потому что это не даёт нужного результата. Для точного определения типа и подтипа оружия и брони нужно использовать GetItemInfo(id), а для определения возможности надевания - чтение оружейных и доспеховых навыков персонажа.
 -- Координаты стрелок относительно иконок и другие подобные визуальные элементы менять не нужно без явного указания. Я настроил их вручную.
@@ -268,14 +268,16 @@ local defaultSettings = {
     delay = 1,
     framePos = { point = "CENTER", x = 0, y = 0 },
     blacklist = {},
-    autoEquipAmmo = false,
-    ammoBestQuality = true
+    autoEquipAmmo = true,
+    ammoBestQuality = true,
+    autoEquipBags = true
 }
 
 local itemQueue = {}
 local mainFrame = nil
 local itemScoreCache = {}
 local settingsFrame = nil
+local sessionIgnoreList = {} -- Временный игнор-лист до перезагрузки UI
 
 -- === ОПТИМИЗАЦИЯ СОБЫТИЙ (DEBOUNCE) ===
 local isDirty = false
@@ -368,6 +370,77 @@ function AEB:EquipBestAmmo()
         if equippedLink ~= ammo.link then
             PickupContainerItem(ammo.bag, ammo.slot)
             EquipCursorItem(AMMOSLOT)
+        end
+    end
+end
+
+-- === ФУНКЦИИ ДЛЯ РАБОТЫ С СУМКАМИ ===
+-- Слоты для сумок: 19, 20, 21, 22 (ContainerID 1, 2, 3, 4)
+local BAG_SLOTS = {19, 20, 21, 22}
+
+function AEB:FindBestBag()
+    local bestBag = nil
+    local bestSlots = 0
+
+    -- Ищем в основной сумке (bag 0) - там обычно лежат новые сумки
+    for bag = 0, 4 do
+        for slot = 1, GetContainerNumSlots(bag) do
+            local itemLink = GetContainerItemLink(bag, slot)
+            if itemLink then
+                local itemName, _, _, _, _, itemType, itemSubType = GetItemInfo(itemLink)
+                -- Проверяем, что это контейнер (сумка) - проверяем все варианты локализации
+                if itemType == "Контейнер" or itemType == "Container" or itemType == "Сумки" or itemType == "Сумка" then
+                    -- Пробуем получить размер сумки через tooltip
+                    scanner:ClearLines()
+                    scanner:SetHyperlink(itemLink)
+
+                    for i = 1, scanner:NumLines() do
+                        local text = _G["AEBScannerTextLeft"..i]:GetText()
+                        if text then
+                            -- Паттерны для разных локализаций: "6-слотовый", "6 Slot", "6-Slot", "(6 ячеек)"
+                            local slots = text:match("(%d+)%-слотовый") or text:match("(%d+)%-Slot") or text:match("(%d+) Slot") or text:match("%((%d+) ячеек%)")
+                            if slots then
+                                slots = tonumber(slots)
+                                if slots and slots > bestSlots then
+                                    bestSlots = slots
+                                    bestBag = {bag = bag, slot = slot, link = itemLink, slots = slots}
+                                end
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return bestBag
+end
+
+function AEB:EquipBestBags()
+    if not self.db.autoEquipBags then
+        return
+    end
+
+    -- Ищем первый пустой слот для сумки
+    for _, bagSlot in ipairs(BAG_SLOTS) do
+        local equippedLink = GetInventoryItemLink("player", bagSlot)
+
+        -- Если слот пустой
+        if not equippedLink then
+            -- Ищем любую сумку в инвентаре
+            local bestBag = self:FindBestBag()
+            if bestBag then
+                ClearCursor()
+                PickupContainerItem(bestBag.bag, bestBag.slot)
+
+                if CursorHasItem() then
+                    EquipCursorItem(bagSlot)
+                end
+
+                -- Надеваем только ОДНУ сумку за раз
+                return
+            end
         end
     end
 end
@@ -533,15 +606,17 @@ function AEB:OnInitialize()
                 needRestore = false
                 restoreTimer = 0
                 -- Показываем стрелки заново
-                for _, arrow in ipairs(upgradeArrows) do
-                    if arrow.isQuestReward then
-                        -- Проверяем, есть ли у стрелки точки привязки
-                        local numPoints = arrow:GetNumPoints()
-                        if numPoints == 0 then
-                            -- Находим кнопку с лучшим апгрейдом и привязываем заново
-                            AEB:UpdateQuestRewardsArrows()
-                        else
-                            arrow:Show()
+                if upgradeArrows then
+                    for _, arrow in ipairs(upgradeArrows) do
+                        if arrow.isQuestReward then
+                            -- Проверяем, есть ли у стрелки точки привязки
+                            local numPoints = arrow:GetNumPoints()
+                            if numPoints == 0 then
+                                -- Находим кнопку с лучшим апгрейдом и привязываем заново
+                                AEB:UpdateQuestRewardsArrows()
+                            else
+                                arrow:Show()
+                            end
                         end
                     end
                 end
@@ -579,6 +654,8 @@ function AEB:BAG_UPDATE()
 
     -- Автоэкипировка боеприпасов
     self:EquipBestAmmo()
+    -- Автоэкипировка сумок
+    self:EquipBestBags()
 end
 function AEB:MERCHANT_SHOW() isDirty = true end
 function AEB:MERCHANT_UPDATE() isDirty = true end
@@ -587,6 +664,13 @@ function AEB:PLAYER_EQUIPMENT_CHANGED()
     isDirty = true
     -- Автоэкипировка боеприпасов при смене оружия
     self:EquipBestAmmo()
+    -- Автоэкипировка сумок
+    self:EquipBestBags()
+    -- Обновляем квестовые стрелки при смене экипировки
+    if (QuestLogFrame and QuestLogFrame:IsVisible()) or (QuestLogDetailFrame and QuestLogDetailFrame:IsVisible()) or (QuestFrame and QuestFrame:IsVisible()) then
+        questRewardDelayPending = true
+        questRewardDelayTimer = 0
+    end
 end
 function AEB:PLAYER_ENTERING_WORLD()
     -- Запуск проверки при входе в мир с задержкой
@@ -775,9 +859,9 @@ end
 
 function AEB:GetUpgradeInfo(newItemLink, loc, newItemScore)
     if not newItemScore or newItemScore <= 0 then return false end
-    
+
     local isWeaponSlot = (loc == "INVTYPE_WEAPON" or loc == "INVTYPE_2HWEAPON" or loc == "INVTYPE_WEAPONMAINHAND" or loc == "INVTYPE_WEAPONOFFHAND" or loc == "INVTYPE_SHIELD" or loc == "INVTYPE_HOLDABLE")
-    
+
     if isWeaponSlot then
         local eqMHLink = GetInventoryItemLink("player", 16)
         local eqOHLink = GetInventoryItemLink("player", 17)
@@ -802,11 +886,17 @@ function AEB:GetUpgradeInfo(newItemLink, loc, newItemScore)
                 -- Без таланта двуручник заменяет оба слота
                 local totalEqScore = eqMHScore + eqOHScore
                 if newItemScore > totalEqScore then
-                    local names = {}
-                    if eqMHLink then table.insert(names, (select(1, GetItemInfo(eqMHLink)))) end
-                    if eqOHLink then table.insert(names, (select(1, GetItemInfo(eqOHLink)))) end
-                    local oldNameStr = #names > 0 and table.concat(names, " + ") or "Ничего не надето"
-                    return true, newItemScore, totalEqScore, nil, oldNameStr, nil, true
+                    -- Если в offhand что-то есть, показываем комбо через oldNameOvr
+                    if eqOHLink then
+                        local names = {}
+                        if eqMHLink then table.insert(names, (select(1, GetItemInfo(eqMHLink)))) end
+                        table.insert(names, (select(1, GetItemInfo(eqOHLink))))
+                        local oldNameStr = table.concat(names, " + ")
+                        return true, newItemScore, totalEqScore, nil, oldNameStr, nil, true
+                    else
+                        -- Если offhand пустой, просто возвращаем mainhand
+                        return true, newItemScore, totalEqScore, eqMHLink, nil, nil, false
+                    end
                 end
             end
             return false
@@ -837,8 +927,8 @@ function AEB:GetUpgradeInfo(newItemLink, loc, newItemScore)
             end
 
             if comboScore > eqMHScore then
-                local oldName = eqMHLink and (select(1, GetItemInfo(eqMHLink))) or "Ничего не надето"
-                return true, comboScore, eqMHScore, eqMHLink, oldName, companionLink, false
+                -- oldNameOvr = nil, так как у нас есть конкретный oldL (двуручник)
+                return true, comboScore, eqMHScore, eqMHLink, nil, companionLink, false
             end
             return false
         end
@@ -867,6 +957,7 @@ function AEB:GetUpgradeInfo(newItemLink, loc, newItemScore)
     end
 
     local oldScore, oldLink = self:GetEquippedScoreAndLink(loc)
+    -- Всегда считаем апгрейдом, если новый предмет лучше надетого (включая пустой слот)
     if newItemScore > oldScore then
         return true, newItemScore, oldScore, oldLink, nil, nil, false
     end
@@ -898,11 +989,8 @@ function AEB:GetMerchantButton(index)
 end
 
 -- === ГЛАВНАЯ ЛОГИКА АНАЛИЗА И ОТРИСОВКИ ===
--- Функция проверки и предложения улучшений
-function AEB:CheckAndSuggestUpgrades()
-    if InCombatLockdown() then return end
-    if not self.db.autoSuggest and not self.db.autoEquip then return end
-
+-- Общая функция для поиска апгрейдов в сумках
+function AEB:FindBagUpgrades()
     local upgrades = {}
 
     for bag = 0, 4 do
@@ -910,7 +998,7 @@ function AEB:CheckAndSuggestUpgrades()
             local link = GetContainerItemLink(bag, slot)
             if link and IsEquippableItem(link) then
                 local id = link:match("item:(%d+)")
-                if id and not self.db.blacklist[id] then
+                if id and not self.db.blacklist[id] and not sessionIgnoreList[id] then
                     local _, _, _, _, minLvl, itemType, subType, _, loc = GetItemInfo(link)
                     if loc and equipSlotMap[loc] then
                         if (not minLvl or minLvl <= UnitLevel("player")) and self:CanPlayerWear(itemType, subType) then
@@ -918,9 +1006,6 @@ function AEB:CheckAndSuggestUpgrades()
                             local isUp, newS, oldS, oldL, oldNameOvr, compLink, oldIsPair = self:GetUpgradeInfo(link, loc, score)
 
                             if isUp then
-                                -- Проверка на пустой слот
-                                local isEmpty = (oldS == 0 or not oldL)
-
                                 table.insert(upgrades, {
                                     link = link, id = id, score = score, bag = bag, slot = slot, loc = loc,
                                     newS = newS, oldS = oldS, oldL = oldL, oldNameOvr = oldNameOvr,
@@ -933,6 +1018,16 @@ function AEB:CheckAndSuggestUpgrades()
             end
         end
     end
+
+    return upgrades
+end
+
+-- Функция проверки и предложения улучшений
+function AEB:CheckAndSuggestUpgrades()
+    if InCombatLockdown() then return end
+    if not self.db.autoSuggest and not self.db.autoEquip then return end
+
+    local upgrades = self:FindBagUpgrades()
 
     -- Сортировка по приросту
     table.sort(upgrades, function(a, b)
@@ -993,35 +1088,19 @@ function AEB:RefreshArrows()
     self:ReleaseAllArrows()
     self:ReleaseAllCoins()
     if InCombatLockdown() then return end
-    
-    local bestBags = {}
-    for bag = 0, 4 do
-        for slot = 1, GetContainerNumSlots(bag) do
-            local link = GetContainerItemLink(bag, slot)
-            if link and IsEquippableItem(link) then
-                local id = link:match("item:(%d+)")
-                if id and not self.db.blacklist[id] then
-                    local _, _, _, _, minLvl, itemType, subType, _, loc = GetItemInfo(link)
-                    if loc and equipSlotMap[loc] then
-                        if (not minLvl or minLvl <= UnitLevel("player")) and self:CanPlayerWear(itemType, subType) then
-                            local score = self:GetScoreForLink(link)
-                            local isUp, newS, oldS, oldL, oldNameOvr, compLink, oldIsPair = self:GetUpgradeInfo(link, loc, score)
 
-                            if isUp then
-                                if not bestBags[loc] or newS > bestBags[loc].newS then
-                                    bestBags[loc] = {
-                                        link = link, id = id, score = score, bag = bag, slot = slot, loc = loc,
-                                        newS = newS, oldS = oldS, oldL = oldL, oldNameOvr = oldNameOvr, compLink = compLink, oldIsPair = oldIsPair
-                                    }
-                                end
-                            end
-                        end
-                    end
-                end
-            end
+    -- Находим все апгрейды в сумках
+    local upgrades = self:FindBagUpgrades()
+
+    -- Группируем по слотам, оставляя только лучший для каждого слота
+    local bestBags = {}
+    for _, upgrade in ipairs(upgrades) do
+        if not bestBags[upgrade.loc] or upgrade.newS > bestBags[upgrade.loc].newS then
+            bestBags[upgrade.loc] = upgrade
         end
     end
-    
+
+    -- Анализируем предметы у торговца
     local bestMerchant = {}
     if MerchantFrame and MerchantFrame:IsVisible() then
         local numMerchantItems = GetMerchantNumItems()
@@ -1047,6 +1126,7 @@ function AEB:RefreshArrows()
         end
     end
 
+    -- Отображаем стрелки на предметах в сумках
     for loc, data in pairs(bestBags) do
         local btn = self:GetContainerButton(data.bag, data.slot)
         if btn and btn:IsVisible() then
@@ -1056,8 +1136,15 @@ function AEB:RefreshArrows()
             arrow:Show()
         end
 
+        -- Добавляем в очередь, если ещё не добавлен
         local alreadyInQueue = false
-        for _, q in ipairs(itemQueue) do if q.id == data.id then alreadyInQueue = true end end
+        for _, q in ipairs(itemQueue) do
+            if q.id == data.id then
+                alreadyInQueue = true
+                break
+            end
+        end
+
         if not alreadyInQueue then
             if #itemQueue == 0 then
                 self.queueCurrent = 1
@@ -1072,6 +1159,7 @@ function AEB:RefreshArrows()
         end
     end
 
+    -- Отображаем стрелки на предметах у торговца
     local startIdx = ((MerchantFrame.page or 1) - 1) * MERCHANT_ITEMS_PER_PAGE + 1
     local endIdx = startIdx + MERCHANT_ITEMS_PER_PAGE - 1
     for slotId, data in pairs(bestMerchant) do
@@ -1115,6 +1203,69 @@ local function AddStats(t1, t2)
     for k, v in pairs(t2) do
         if type(v) == "number" then t1[k] = (t1[k] or 0) + v end
     end
+end
+
+-- Функция обновления статистики в окне сравнения
+function AEB:UpdateComparisonStats()
+    if not mainFrame or not mainFrame.currentItem then return end
+
+    local q = mainFrame.currentItem
+    local newStats = self:ScanItem(q.link)
+    if q.compLink then AddStats(newStats, self:ScanItem(q.compLink)) end
+
+    local oldStats = {}
+    if q.oldIsPair then
+        local eqMHLink = GetInventoryItemLink("player", 16)
+        local eqOHLink = GetInventoryItemLink("player", 17)
+        if eqMHLink then AddStats(oldStats, self:ScanItem(eqMHLink)) end
+        if eqOHLink then AddStats(oldStats, self:ScanItem(eqOHLink)) end
+    elseif q.oldL then
+        oldStats = self:ScanItem(q.oldL)
+    end
+
+    -- Если выбран старый предмет, инвертируем сравнение
+    local deltas = {}
+    if mainFrame.selectedItem == "old" then
+        -- Показываем, что потеряем при выборе старого предмета
+        for statName, newValue in pairs(newStats) do
+            if type(newValue) == "number" then
+                local oldValue = oldStats[statName] or 0
+                local delta = oldValue - newValue
+                if delta ~= 0 then deltas[statName] = delta end
+            end
+        end
+        for statName, oldValue in pairs(oldStats) do
+            if type(oldValue) == "number" and not newStats[statName] then
+                deltas[statName] = oldValue
+            end
+        end
+    else
+        -- Показываем, что получим при выборе нового предмета
+        for statName, newValue in pairs(newStats) do
+            if type(newValue) == "number" then
+                local oldValue = oldStats[statName] or 0
+                local delta = newValue - oldValue
+                if delta ~= 0 then deltas[statName] = delta end
+            end
+        end
+        for statName, oldValue in pairs(oldStats) do
+            if type(oldValue) == "number" and not newStats[statName] then
+                deltas[statName] = -oldValue
+            end
+        end
+    end
+
+    local statsText = ""
+    for statName, delta in pairs(deltas) do
+        if delta > 0 then
+            statsText = statsText .. "|cff00ff00+" .. delta .. "|r " .. statName .. "\n"
+        elseif delta < 0 then
+            statsText = statsText .. "|cffff0000" .. delta .. "|r " .. statName .. "\n"
+        end
+    end
+
+    if statsText == "" then statsText = "|cff888888Нет изменений|r" end
+    mainFrame.stats:SetText(statsText)
 end
 
 function AEB:CreateUI(q)
@@ -1166,18 +1317,42 @@ function AEB:CreateUI(q)
         mainFrame.icon = mainFrame:CreateTexture(nil, "OVERLAY")
         mainFrame.icon:SetSize(42, 42)
         mainFrame.icon:SetPoint("TOPLEFT", mainFrame.recLabel, "BOTTOMLEFT", 0, -10)
-        
+
         mainFrame.iconBorder = mainFrame:CreateTexture(nil, "BORDER")
         mainFrame.iconBorder:SetTexture("Interface\\Buttons\\UI-Quickslot2")
         mainFrame.iconBorder:SetSize(70, 70)
         mainFrame.iconBorder:SetPoint("CENTER", mainFrame.icon, "CENTER", 0, 0)
 
+        -- Золотистая подсветка для нового предмета
+        mainFrame.iconHighlight = mainFrame:CreateTexture(nil, "OVERLAY")
+        mainFrame.iconHighlight:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+        mainFrame.iconHighlight:SetBlendMode("ADD")
+        mainFrame.iconHighlight:SetSize(70, 70)
+        mainFrame.iconHighlight:SetPoint("CENTER", mainFrame.icon, "CENTER", 0, 0)
+        mainFrame.iconHighlight:SetVertexColor(1, 0.82, 0, 1)
+
+        -- Кликабельная кнопка для нового предмета
+        mainFrame.iconButton = CreateFrame("Button", nil, mainFrame)
+        mainFrame.iconButton:SetSize(42, 42)
+        mainFrame.iconButton:SetPoint("CENTER", mainFrame.icon, "CENTER")
+        mainFrame.iconButton:SetScript("OnClick", function()
+            if mainFrame.selectedItem ~= "new" then
+                mainFrame.selectedItem = "new"
+                mainFrame.iconHighlight:Show()
+                mainFrame.oldIconHighlight:Hide()
+                mainFrame.titleBG:SetBackdropBorderColor(1, 0.82, 0) -- Золотистая рамка
+                mainFrame.oldTitleBG:SetBackdropBorderColor(0.5, 0.5, 0.5) -- Серая рамка
+                mainFrame.cb:SetChecked(false)
+                AEB:UpdateComparisonStats()
+            end
+        end)
+
         mainFrame.title = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         mainFrame.title:SetPoint("LEFT", mainFrame.icon, "RIGHT", 1, 0)
         mainFrame.title:SetSize(160, 44)
         mainFrame.title:SetJustifyH("LEFT")
-        
-        mainFrame.titleBG = CreateFrame("Frame", nil, mainFrame)
+
+        mainFrame.titleBG = CreateFrame("Button", nil, mainFrame)
         mainFrame.titleBG:SetBackdrop({
             bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
             edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -1189,7 +1364,20 @@ function AEB:CreateUI(q)
         mainFrame.titleBG:SetHeight(44)
         mainFrame.titleBG:SetPoint("LEFT", mainFrame.title, "LEFT", -3, 0)
         mainFrame.titleBG:SetPoint("RIGHT", mainFrame.title, "RIGHT", 5, 0)
-        mainFrame.title:SetParent(mainFrame.titleBG) 
+        mainFrame.title:SetParent(mainFrame.titleBG)
+
+        -- Кликабельность для названия нового предмета
+        mainFrame.titleBG:SetScript("OnClick", function()
+            if mainFrame.selectedItem ~= "new" then
+                mainFrame.selectedItem = "new"
+                mainFrame.iconHighlight:Show()
+                mainFrame.oldIconHighlight:Hide()
+                mainFrame.titleBG:SetBackdropBorderColor(1, 0.82, 0) -- Золотистая рамка
+                mainFrame.oldTitleBG:SetBackdropBorderColor(0.5, 0.5, 0.5) -- Серая рамка
+                mainFrame.cb:SetChecked(false)
+                AEB:UpdateComparisonStats()
+            end
+        end) 
 
         mainFrame.eqLabel = mainFrame:CreateFontString(nil, "OVERLAY", fontTitle)
         mainFrame.eqLabel:SetPoint("TOPLEFT", mainFrame.icon, "BOTTOMLEFT", 0, -15)
@@ -1198,18 +1386,43 @@ function AEB:CreateUI(q)
         mainFrame.oldIcon = mainFrame:CreateTexture(nil, "OVERLAY")
         mainFrame.oldIcon:SetSize(42, 42)
         mainFrame.oldIcon:SetPoint("TOPLEFT", mainFrame.eqLabel, "BOTTOMLEFT", 0, -10)
-        
+
         mainFrame.oldIconBorder = mainFrame:CreateTexture(nil, "BORDER")
         mainFrame.oldIconBorder:SetTexture("Interface\\Buttons\\UI-Quickslot2")
         mainFrame.oldIconBorder:SetSize(70, 70)
         mainFrame.oldIconBorder:SetPoint("CENTER", mainFrame.oldIcon, "CENTER", 0, 0)
+
+        -- Золотистая подсветка для старого предмета
+        mainFrame.oldIconHighlight = mainFrame:CreateTexture(nil, "OVERLAY")
+        mainFrame.oldIconHighlight:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+        mainFrame.oldIconHighlight:SetBlendMode("ADD")
+        mainFrame.oldIconHighlight:SetSize(70, 70)
+        mainFrame.oldIconHighlight:SetPoint("CENTER", mainFrame.oldIcon, "CENTER", 0, 0)
+        mainFrame.oldIconHighlight:SetVertexColor(1, 0.82, 0, 1)
+        mainFrame.oldIconHighlight:Hide() -- По умолчанию скрыта
+
+        -- Кликабельная кнопка для старого предмета
+        mainFrame.oldIconButton = CreateFrame("Button", nil, mainFrame)
+        mainFrame.oldIconButton:SetSize(42, 42)
+        mainFrame.oldIconButton:SetPoint("CENTER", mainFrame.oldIcon, "CENTER")
+        mainFrame.oldIconButton:SetScript("OnClick", function()
+            if mainFrame.selectedItem ~= "old" then
+                mainFrame.selectedItem = "old"
+                mainFrame.oldIconHighlight:Show()
+                mainFrame.iconHighlight:Hide()
+                mainFrame.oldTitleBG:SetBackdropBorderColor(1, 0.82, 0) -- Золотистая рамка
+                mainFrame.titleBG:SetBackdropBorderColor(0.5, 0.5, 0.5) -- Серая рамка
+                mainFrame.cb:SetChecked(false)
+                AEB:UpdateComparisonStats()
+            end
+        end)
         
         mainFrame.oldTitle = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         mainFrame.oldTitle:SetPoint("LEFT", mainFrame.oldIcon, "RIGHT", 1, 0)
         mainFrame.oldTitle:SetSize(160, 44)
         mainFrame.oldTitle:SetJustifyH("LEFT")
-        
-        mainFrame.oldTitleBG = CreateFrame("Frame", nil, mainFrame)
+
+        mainFrame.oldTitleBG = CreateFrame("Button", nil, mainFrame)
         mainFrame.oldTitleBG:SetBackdrop({
             bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
             edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -1222,6 +1435,19 @@ function AEB:CreateUI(q)
         mainFrame.oldTitleBG:SetPoint("LEFT", mainFrame.oldTitle, "LEFT", -3, 0)
         mainFrame.oldTitleBG:SetPoint("RIGHT", mainFrame.oldTitle, "RIGHT", 5, 0)
         mainFrame.oldTitle:SetParent(mainFrame.oldTitleBG)
+
+        -- Кликабельность для названия старого предмета
+        mainFrame.oldTitleBG:SetScript("OnClick", function()
+            if mainFrame.selectedItem ~= "old" then
+                mainFrame.selectedItem = "old"
+                mainFrame.oldIconHighlight:Show()
+                mainFrame.iconHighlight:Hide()
+                mainFrame.oldTitleBG:SetBackdropBorderColor(1, 0.82, 0) -- Золотистая рамка
+                mainFrame.titleBG:SetBackdropBorderColor(0.5, 0.5, 0.5) -- Серая рамка
+                mainFrame.cb:SetChecked(false)
+                AEB:UpdateComparisonStats()
+            end
+        end)
 
         mainFrame.statsHeader = mainFrame:CreateFontString(nil, "OVERLAY", fontTitle)
         mainFrame.statsHeader:SetPoint("TOPLEFT", 240, -20)
@@ -1238,6 +1464,17 @@ function AEB:CreateUI(q)
         mainFrame.cb:SetPoint("BOTTOMLEFT", 15, 45)
         mainFrame.cb.text = _G[mainFrame.cb:GetName() .. "Text"]
         mainFrame.cb.text:SetFontObject("GameFontNormal")
+        mainFrame.cb:SetScript("OnClick", function(self)
+            if self:GetChecked() then
+                -- При активации чекбокса переключаем выбор на старый предмет
+                mainFrame.selectedItem = "old"
+                mainFrame.oldIconHighlight:Show()
+                mainFrame.iconHighlight:Hide()
+                mainFrame.oldTitleBG:SetBackdropBorderColor(1, 0.82, 0) -- Золотистая рамка
+                mainFrame.titleBG:SetBackdropBorderColor(0.5, 0.5, 0.5) -- Серая рамка
+                AEB:UpdateComparisonStats()
+            end
+        end)
 
         mainFrame.btnOk = CreateFrame("Button", nil, mainFrame, "UIPanelButtonTemplate")
         mainFrame.btnOk:SetSize(80, 25)
@@ -1253,16 +1490,28 @@ function AEB:CreateUI(q)
         mainFrame.count:SetPoint("BOTTOMRIGHT", -25, 20)
     end
 
+    -- Сохраняем данные предмета для функции UpdateComparisonStats
+    mainFrame.currentItem = q
+
+    -- По умолчанию выбран новый предмет
+    mainFrame.selectedItem = "new"
+
     local itemName, _, _, _, _, _, _, _, _, tex = GetItemInfo(q.link)
 
     if q.compLink then
         local compName = (select(1, GetItemInfo(q.compLink)))
         itemName = itemName .. " + " .. compName
     end
-    
+
     mainFrame.icon:SetTexture(tex)
-    mainFrame.title:SetText(itemName) 
-    mainFrame.title:SetTextColor(1, 1, 1) 
+    mainFrame.title:SetText(itemName)
+    mainFrame.title:SetTextColor(1, 1, 1)
+
+    -- Устанавливаем золотистую подсветку на новый предмет
+    mainFrame.iconHighlight:Show()
+    mainFrame.oldIconHighlight:Hide()
+    mainFrame.titleBG:SetBackdropBorderColor(1, 0.82, 0) -- Золотистая рамка
+    mainFrame.oldTitleBG:SetBackdropBorderColor(0.5, 0.5, 0.5) -- Серая рамка 
     
     mainFrame.cb.text:SetText("Добавить в чёрный список")
     
@@ -1288,61 +1537,43 @@ function AEB:CreateUI(q)
     end
     mainFrame.cb:SetChecked(false)
 
-    local newStats = self:ScanItem(q.link)
-    if q.compLink then AddStats(newStats, self:ScanItem(q.compLink)) end
-    
-    local oldStats = {}
-    if q.oldIsPair then
-        local eqMHLink = GetInventoryItemLink("player", 16)
-        local eqOHLink = GetInventoryItemLink("player", 17)
-        if eqMHLink then AddStats(oldStats, self:ScanItem(eqMHLink)) end
-        if eqOHLink then AddStats(oldStats, self:ScanItem(eqOHLink)) end
-    elseif q.oldL then
-        oldStats = self:ScanItem(q.oldL)
-    end
-    
-    local deltas = {}
-    for statName, newValue in pairs(newStats) do
-        if type(newValue) == "number" then
-            local oldValue = oldStats[statName] or 0
-            local delta = newValue - oldValue
-            if delta ~= 0 then deltas[statName] = delta end
-        end
-    end
-    
-    for statName, oldValue in pairs(oldStats) do
-        if type(oldValue) == "number" and not newStats[statName] then
-            deltas[statName] = -oldValue
-        end
-    end
-
-    local statsText = ""
-    for statName, delta in pairs(deltas) do
-        if delta > 0 then
-            statsText = statsText .. "|cff00ff00" .. delta .. "|r " .. statName .. "\n"
-        elseif delta < 0 then
-            statsText = statsText .. "|cffff0000" .. delta .. "|r " .. statName .. "\n"
-        end
-    end
-    
-    if statsText == "" then statsText = "|cff888888Только базовые изменения|r" end
-    mainFrame.stats:SetText(statsText)
+    -- Обновляем статистику через новую функцию
+    self:UpdateComparisonStats()
 
     mainFrame.btnOk:SetScript("OnClick", function()
-        -- Проверка на бой (кроме оружия)
-        if UnitAffectingCombat("player") then
-            local isWeaponSlot = (q.loc == "INVTYPE_WEAPON" or q.loc == "INVTYPE_2HWEAPON" or
-                                  q.loc == "INVTYPE_WEAPONMAINHAND" or q.loc == "INVTYPE_WEAPONOFFHAND" or
-                                  q.loc == "INVTYPE_SHIELD" or q.loc == "INVTYPE_HOLDABLE" or
-                                  q.loc == "INVTYPE_RANGED" or q.loc == "INVTYPE_THROWN" or q.loc == "INVTYPE_RANGEDRIGHT")
-            if not isWeaponSlot then
-                print("|cffff0000Невозможно сменить экипировку в бою (кроме оружия)|r")
-                return
+        local id = q.link:match("item:(%d+)")
+
+        -- Если выбран новый предмет - экипируем его
+        if mainFrame.selectedItem == "new" then
+            -- Проверка на бой (кроме оружия)
+            if UnitAffectingCombat("player") then
+                local isWeaponSlot = (q.loc == "INVTYPE_WEAPON" or q.loc == "INVTYPE_2HWEAPON" or
+                                      q.loc == "INVTYPE_WEAPONMAINHAND" or q.loc == "INVTYPE_WEAPONOFFHAND" or
+                                      q.loc == "INVTYPE_SHIELD" or q.loc == "INVTYPE_HOLDABLE" or
+                                      q.loc == "INVTYPE_RANGED" or q.loc == "INVTYPE_THROWN" or q.loc == "INVTYPE_RANGEDRIGHT")
+                if not isWeaponSlot then
+                    print("|cffff0000Невозможно сменить экипировку в бою (кроме оружия)|r")
+                    return
+                end
+            end
+
+            EquipItemByName(q.link)
+            if q.compLink then EquipItemByName(q.compLink) end
+        else
+            -- Если выбран старый предмет - добавляем новый в временный игнор-лист
+            if id then
+                sessionIgnoreList[id] = true
             end
         end
 
-        EquipItemByName(q.link)
-        if q.compLink then EquipItemByName(q.compLink) end
+        -- Если чекбокс активен - добавляем в постоянный чёрный список
+        if mainFrame.cb:GetChecked() then
+            if id then
+                AEB.db.blacklist[id] = true
+                print("|cffff8800Предмет добавлен в чёрный список|r")
+            end
+        end
+
         table.remove(itemQueue, 1)
         AEB.queueCurrent = AEB.queueCurrent + 1
         mainFrame:Hide()
@@ -1350,13 +1581,7 @@ function AEB:CreateUI(q)
     end)
 
     mainFrame.btnNo:SetScript("OnClick", function()
-        if mainFrame.cb:GetChecked() then
-            local id = q.link:match("item:(%d+)")
-            if id then
-                AEB.db.blacklist[id] = true
-                print("|cffff8800Предмет добавлен в чёрный список|r")
-            end
-        end
+        -- Отмена - просто пропускаем предмет без добавления в чёрный список
         table.remove(itemQueue, 1)
         AEB.queueCurrent = AEB.queueCurrent + 1
         mainFrame:Hide()
@@ -1382,7 +1607,7 @@ end
 
 function AEB:UpdateTradeSkillArrow(id)
     if not id or not TradeSkillSkillIcon then return end
-    
+
     -- Выделяем персональную стрелочку для окна крафта, чтобы не зависеть от пула сумок
     if not self.tsArrow then
         self.tsArrow = self:GetArrowFrame()
@@ -1392,11 +1617,11 @@ function AEB:UpdateTradeSkillArrow(id)
 
     local link = GetTradeSkillItemLink(id)
     if link and IsEquippableItem(link) then
-        local _, _, _, _, _, _, _, _, loc = GetItemInfo(link)
-        if loc and equipSlotMap[loc] then
+        local _, _, _, _, _, itemType, subType, _, loc = GetItemInfo(link)
+        if loc and equipSlotMap[loc] and self:CanPlayerWear(itemType, subType) then
             local score = self:GetScoreForLink(link)
-            local oldScore = self:GetEquippedScoreAndLink(loc)
-            if score > oldScore then
+            local isUp = self:GetUpgradeInfo(link, loc, score)
+            if isUp then
                 self.tsArrow:SetParent(TradeSkillSkillIcon)
                 self.tsArrow:SetPoint("BOTTOMRIGHT", TradeSkillSkillIcon, "BOTTOMRIGHT", 5, -3)
                 self.tsArrow:Show()
@@ -1406,6 +1631,131 @@ function AEB:UpdateTradeSkillArrow(id)
 end
 
 -- === АНАЛИЗ НАГРАД ЗА ЗАДАНИЯ ===
+-- Общая функция для анализа квестовых наград
+function AEB:AnalyzeQuestRewards(isLog)
+    local numChoices = isLog and GetNumQuestLogChoices() or GetNumQuestChoices()
+    if numChoices <= 0 then return nil, nil end
+
+    local bestUpgradeIdx = nil
+    local bestUpgradeGain = 0
+    local bestValueIdx = nil
+    local bestValue = -1
+
+    for i = 1, numChoices do
+        local link = isLog and GetQuestLogItemLink("choice", i) or GetQuestItemLink("choice", i)
+        if link then
+            local _, _, _, _, _, itemType, subType, _, loc, _, itemSellPrice = GetItemInfo(link)
+            local quantity = 1
+            if isLog then
+                _, _, quantity = GetQuestLogChoiceInfo(i)
+            else
+                _, _, quantity = GetQuestItemInfo("choice", i)
+            end
+
+            -- Поиск самого дорогого предмета
+            local totalValue = (itemSellPrice or 0) * (quantity or 1)
+            if totalValue > bestValue then
+                bestValue = totalValue
+                bestValueIdx = i
+            end
+
+            -- Поиск лучшего апгрейда
+            if IsEquippableItem(link) and loc and equipSlotMap[loc] and self:CanPlayerWear(itemType, subType) then
+                local score = self:GetScoreForLink(link)
+                local isUp, newS, oldS, oldL, oldNameOvr, compLink, oldIsPair = self:GetUpgradeInfo(link, loc, score)
+
+                if isUp then
+                    local gain = newS - oldS
+                    if gain > bestUpgradeGain then
+                        bestUpgradeGain = gain
+                        bestUpgradeIdx = i
+                    end
+                end
+            end
+        end
+    end
+
+    return bestUpgradeIdx, bestValueIdx
+end
+
+-- Флаг для отслеживания окна сдачи квеста
+local isInQuestCompleteWindow = false
+
+-- Единая функция для позиционирования стрелки на кнопке награды
+-- Определяет тип окна и применяет правильную привязку
+-- windowType: "complete" (окно сдачи), "detail" (окно принятия), "log" (журнал), nil (автоопределение)
+local function PositionQuestArrow(arrow, btn, rewardIndex, windowType)
+    local isLog = QuestInfoFrame.questLog
+    local isQuestDetail = QuestFrame and QuestFrame:IsVisible()
+    local isQuestLogDetail = QuestLogDetailFrame and QuestLogDetailFrame:IsVisible()
+
+    -- Определяем, это окно сдачи квеста (QUEST_COMPLETE) или принятия задания
+    -- В окне сдачи квеста видна кнопка "Завершить задание"
+    local isQuestComplete = (windowType == "complete") or (QuestFrameCompleteButton and QuestFrameCompleteButton:IsVisible())
+
+    -- Если открыт QuestLogDetailFrame, это тоже журнал квестов
+    if isQuestLogDetail then
+        isLog = true
+    end
+
+    local icon = _G["QuestInfoItem" .. rewardIndex .. "IconTexture"] or btn.Icon
+
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: PositionQuestArrow - windowType=" .. tostring(windowType) .. ", isLog=" .. tostring(isLog) .. ", isQuestDetail=" .. tostring(isQuestDetail) .. ", isQuestComplete=" .. tostring(isQuestComplete) .. "|r")
+    end
+
+    if isLog or isQuestLogDetail then
+        -- ЖУРНАЛ КВЕСТОВ: привязываем к ScrollChild для корректной прокрутки
+        local scrollFrame = QuestLogDetailScrollFrame or QuestLogScrollFrame
+        local scrollChild = scrollFrame and scrollFrame:GetScrollChild()
+
+        if scrollChild then
+            arrow:SetParent(scrollChild)
+            arrow:SetFrameLevel(btn:GetFrameLevel() + 5)
+        else
+            arrow:SetParent(UIParent)
+            arrow:SetFrameLevel(999)
+        end
+
+        if icon then
+            arrow:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", 5, -3)
+        else
+            arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 5, -3)
+        end
+
+    elseif isQuestComplete then
+        -- ОКНО СДАЧИ КВЕСТА (QUEST_COMPLETE): привязываем к QuestFrame
+        arrow:SetParent(QuestFrame or UIParent)
+        arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMLEFT", 42, -2)
+        arrow:SetFrameLevel(btn:GetFrameLevel() + 10)
+
+    elseif isQuestDetail then
+        -- ОКНО ПРИНЯТИЯ ЗАДАНИЯ: привязываем к ScrollChild
+        local scrollFrame = QuestDetailScrollFrame or QuestScrollFrame
+        local scrollChild = scrollFrame and scrollFrame:GetScrollChild()
+
+        if scrollChild then
+            arrow:SetParent(scrollChild)
+            arrow:SetFrameLevel(btn:GetFrameLevel() + 5)
+        else
+            arrow:SetParent(UIParent)
+            arrow:SetFrameStrata("TOOLTIP")
+        end
+
+        if icon then
+            arrow:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", 5, -3)
+        else
+            arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 5, -3)
+        end
+
+    else
+        -- Fallback: привязываем к UIParent
+        arrow:SetParent(UIParent)
+        arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMLEFT", 42, -2)
+        arrow:SetFrameLevel(999)
+    end
+end
+
 -- Отдельная функция для обновления стрелок на квестовых наградах
 local isUpdatingQuestArrows = false
 function AEB:UpdateQuestRewardsArrows()
@@ -1425,70 +1775,41 @@ function AEB:UpdateQuestRewardsArrows()
         end
     end
 
-    local numChoices = 0
     local isLog = QuestInfoFrame.questLog
-    local isQuestDetail = QuestFrame and QuestFrame:IsVisible() -- Окно принятия задания от NPC
-    local isQuestLogDetail = QuestLogDetailFrame and QuestLogDetailFrame:IsVisible() -- Окно из трекера
+    local isQuestLogDetail = QuestLogDetailFrame and QuestLogDetailFrame:IsVisible()
 
     -- Если открыт QuestLogDetailFrame, это тоже считается как журнал квестов
     if isQuestLogDetail then
         isLog = true
     end
 
-    if isLog then
-        numChoices = GetNumQuestLogChoices()
-    else
-        numChoices = GetNumQuestChoices()
+    -- Определяем тип окна для передачи в PositionQuestArrow
+    local windowType = nil
+    local numChoices = GetNumQuestChoices()
+    local hasCompleteButton = QuestFrameCompleteButton and QuestFrameCompleteButton:IsVisible()
+
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: UpdateQuestRewardsArrows - numChoices=" .. tostring(numChoices) .. ", hasCompleteButton=" .. tostring(hasCompleteButton) .. ", isInQuestCompleteWindow=" .. tostring(isInQuestCompleteWindow) .. "|r")
     end
 
-    if numChoices <= 0 then
+    -- Используем флаг isInQuestCompleteWindow, который устанавливается в QUEST_COMPLETE
+    if isInQuestCompleteWindow or (numChoices > 0 and hasCompleteButton) then
+        -- Окно сдачи квеста
+        windowType = "complete"
+    end
+
+    -- Анализируем награды
+    local bestUpgradeIdx, bestValueIdx = self:AnalyzeQuestRewards(isLog)
+
+    if not bestUpgradeIdx and not bestValueIdx then
         isUpdatingQuestArrows = false
         return
     end
 
-    local bestUpgradeIdx = nil
-    local bestUpgradePct = 0
-    local bestValueIdx = nil
-    local bestValue = -1
-
-    for i = 1, numChoices do
-        local link = isLog and GetQuestLogItemLink("choice", i) or GetQuestItemLink("choice", i)
-        if link then
-            local _, _, _, _, _, itemType, subType, _, loc, _, itemSellPrice = GetItemInfo(link)
-            local quantity = 1
-            if isLog then
-                _, _, quantity = GetQuestLogChoiceInfo(i)
-            else
-                _, _, quantity = GetQuestItemInfo("choice", i)
-            end
-
-            local totalValue = (itemSellPrice or 0) * (quantity or 1)
-            if totalValue > bestValue then
-                bestValue = totalValue
-                bestValueIdx = i
-            end
-
-            if IsEquippableItem(link) and loc and equipSlotMap[loc] and self:CanPlayerWear(itemType, subType) then
-                local score = self:GetScoreForLink(link)
-                local isUp, newS, oldS = self:GetUpgradeInfo(link, loc, score)
-
-                if isUp then
-                    local pct = oldS == 0 and 100 or math.floor(((newS - oldS) / newS) * 100)
-                    if pct > 100 then pct = 100 end
-                    if pct < 1 then pct = 1 end
-                    if pct > bestUpgradePct then
-                        bestUpgradePct = pct
-                        bestUpgradeIdx = i
-                    end
-                end
-            end
-        end
-    end
-
-    if bestValueIdx then
+    -- Показываем монетку на самом дорогом предмете
+    if bestValueIdx and bestUpgradeIdx ~= bestValueIdx then
         local btn = _G["QuestInfoItem" .. bestValueIdx]
-        -- Показываем монетку только если это НЕ тот же предмет, что и с апгрейд-маркером
-        if btn and btn:IsVisible() and bestUpgradeIdx ~= bestValueIdx then
+        if btn and btn:IsVisible() then
             local coin = self:GetCoinFrame()
             coin:SetParent(btn)
             coin:SetPoint("TOPRIGHT", btn, "TOPRIGHT", -2, -2)
@@ -1497,50 +1818,12 @@ function AEB:UpdateQuestRewardsArrows()
         end
     end
 
+    -- Показываем стрелку на лучшем апгрейде
     if bestUpgradeIdx then
         local btn = _G["QuestInfoItem" .. bestUpgradeIdx]
         if btn and btn:IsVisible() then
             local arrow = self:GetArrowFrame()
-
-            -- Разное позиционирование в зависимости от типа окна
-            if isLog or isQuestLogDetail then
-                -- В журнале квестов и окне деталей из трекера - привязываем к иконке
-                local icon = _G["QuestInfoItem" .. bestUpgradeIdx .. "IconTexture"] or btn.Icon
-
-                if icon then
-                    arrow:SetParent(btn)
-                    arrow:SetFrameStrata("HIGH")
-                    arrow:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", 5, -3)
-                    arrow:SetFrameLevel(btn:GetFrameLevel() + 5)
-                else
-                    arrow:SetParent(btn)
-                    arrow:SetFrameStrata("HIGH")
-                    arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 5, -3)
-                    arrow:SetFrameLevel(btn:GetFrameLevel() + 5)
-                end
-            elseif isQuestDetail then
-                -- В окне принятия задания - привязываем к иконке, но внутри скролла
-                local icon = _G["QuestInfoItem" .. bestUpgradeIdx .. "IconTexture"] or btn.Icon
-
-                if icon then
-                    arrow:SetParent(btn)
-                    arrow:SetFrameStrata("MEDIUM")
-                    arrow:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", 5, -3)
-                    arrow:SetFrameLevel(btn:GetFrameLevel() + 5)
-                else
-                    arrow:SetParent(btn)
-                    arrow:SetFrameStrata("MEDIUM")
-                    arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 5, -3)
-                    arrow:SetFrameLevel(btn:GetFrameLevel() + 5)
-                end
-            else
-                -- В окне сдачи квеста (QUEST_COMPLETE) - привязываем к UIParent
-                arrow:SetParent(UIParent)
-                arrow:SetFrameStrata("TOOLTIP")
-                arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMLEFT", 42, -2)
-                arrow:SetFrameLevel(999)
-            end
-
+            PositionQuestArrow(arrow, btn, bestUpgradeIdx, windowType)
             arrow.isQuestReward = true
             arrow:Show()
         end
@@ -1573,54 +1856,25 @@ end
 
 function AEB:QUEST_DETAIL()
     -- Событие при открытии окна "Детали задания" (клик на квест в Quest Watch)
+    isInQuestCompleteWindow = false
     questRewardDelayPending = true
     questRewardDelayTimer = 0
 end
 
 function AEB:QUEST_FINISHED()
     -- Событие при закрытии окна квеста
+    isInQuestCompleteWindow = false
     self:ClearQuestRewardMarkers()
 end
 
 function AEB:QUEST_COMPLETE()
-    local numChoices = GetNumQuestChoices()
-    if numChoices <= 0 then return end
+    -- Устанавливаем флаг, что мы в окне сдачи квеста
+    isInQuestCompleteWindow = true
 
-    local bestUpgradeIdx = nil
-    local bestUpgradePct = 0
-    local bestValueIdx = nil
-    local bestValue = -1
+    -- Анализируем награды
+    local bestUpgradeIdx, bestValueIdx = self:AnalyzeQuestRewards(false)
 
-    for i = 1, numChoices do
-        local link = GetQuestItemLink("choice", i)
-        if link then
-            local _, _, _, _, _, itemType, subType, _, loc, _, itemSellPrice = GetItemInfo(link)
-            local _, _, quantity = GetQuestItemInfo("choice", i)
-
-            local totalValue = (itemSellPrice or 0) * (quantity or 1)
-            if totalValue > bestValue then
-                bestValue = totalValue
-                bestValueIdx = i
-            end
-
-            if IsEquippableItem(link) and loc and equipSlotMap[loc] then
-                if self:CanPlayerWear(itemType, subType) then
-                    local score = self:GetScoreForLink(link)
-                    local isUp, newS, oldS = self:GetUpgradeInfo(link, loc, score)
-
-                    if isUp then
-                        local pct = oldS == 0 and 100 or math.floor(((newS - oldS) / newS) * 100)
-                        if pct > 100 then pct = 100 end
-                        if pct < 1 then pct = 1 end
-                        if pct > bestUpgradePct then
-                            bestUpgradePct = pct
-                            bestUpgradeIdx = i
-                        end
-                    end
-                end
-            end
-        end
-    end
+    if not bestUpgradeIdx and not bestValueIdx then return end
 
     -- Показываем стрелки и монетки ПЕРЕД автоматическим кликом
     -- Монетку показываем только если это НЕ тот же предмет, что и с апгрейд-маркером
@@ -1639,11 +1893,7 @@ function AEB:QUEST_COMPLETE()
         local btn = _G["QuestInfoItem" .. bestUpgradeIdx]
         if btn and btn:IsVisible() then
             local arrow = self:GetArrowFrame()
-            -- QUEST_COMPLETE всегда срабатывает в окне NPC (не в журнале)
-            arrow:SetParent(UIParent)
-            arrow:SetFrameStrata("TOOLTIP")
-            arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMLEFT", 42, -2)
-            arrow:SetFrameLevel(999)
+            PositionQuestArrow(arrow, btn, bestUpgradeIdx, "complete")
             arrow.isQuestReward = true
             arrow:Show()
         end
@@ -1756,56 +2006,50 @@ function AEB:ShowSettingsFrame()
         tabs[index] = tab
 
         local btn = CreateFrame("Button", nil, tabsContainer)
-        btn:SetSize(94, 22)
-        btn:SetPoint("TOPLEFT", 3, -3 - (index - 1) * 22)
+        btn:SetSize(94, 18)
+        btn:SetPoint("TOPLEFT", 3, -3 - (index - 1) * 18)
+        
+        -- Текст сразу привязываем к кнопке через SetText, чтобы не плодить переменные
         btn:SetNormalFontObject("GameFontNormalSmall")
         btn:SetHighlightFontObject("GameFontHighlightSmall")
+        btn:SetText(name)
+        btn:GetFontString():SetPoint("LEFT", 8, 0)
+        btn:GetFontString():SetJustifyH("LEFT")
 
-        -- Фон кнопки без рамки
-        btn:SetBackdrop({
-            bgFile = "Interface\\QuestFrame\\UI-QuestLogTitleHighlight",
-            edgeFile = nil,
-            tile = false, tileSize = 8, edgeSize = 0,
-            insets = { left = 0, right = 0, top = 0, bottom = 0 }
-        })
+        -- 1. Текстура при НАВЕДЕНИИ (Highlight)
+        -- Она будет сама появляться и исчезать без OnEnter/OnLeave
+        btn:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+        btn:GetHighlightTexture():SetBlendMode("ADD")
+        btn:GetHighlightTexture():SetAlpha(0.3) -- Делаем чуть тусклее при наведении
 
-        -- Первая вкладка активна по умолчанию
+        -- 2. Текстура АКТИВНОЙ вкладки (Background)
+        btn.selectedTex = btn:CreateTexture(nil, "BACKGROUND")
+        btn.selectedTex:SetAllPoints(btn)
+        btn.selectedTex:SetTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+        btn.selectedTex:SetBlendMode("ADD")
+        btn.selectedTex:SetAlpha(0.5) -- Ярче, когда выбрана
+        btn.selectedTex:Hide()
+
         if index == 1 then
-            btn:SetBackdropColor(1, 1, 1, 0.5)
-        else
-            btn:SetBackdropColor(0.2, 0.2, 0.2, 0)
+            btn.selectedTex:Show()
+            tab:Show()
         end
 
-        local btnText = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        btnText:SetPoint("LEFT", 8, 0)
-        btnText:SetText(name)
-        btnText:SetJustifyH("LEFT")
-
         btn:SetScript("OnClick", function()
-            for i, t in ipairs(tabs) do
-                t:Hide()
-                tabButtons[i]:SetBackdropColor(0.2, 0.2, 0.2, 0)
+            for i, b in ipairs(tabButtons) do
+                tabs[i]:Hide()
+                b.selectedTex:Hide() -- Скрываем подсветку у всех
             end
             tab:Show()
-            btn:SetBackdropColor(1, 1, 1, 0.5)
+            btn.selectedTex:Show() -- Показываем у нажатой
         end)
 
-        btn:SetScript("OnEnter", function()
-            if tabs[index]:IsShown() then return end
-            btn:SetBackdropColor(0.4, 0.4, 0.4, 0.3)
-        end)
-
-        btn:SetScript("OnLeave", function()
-            if tabs[index]:IsShown() then return end
-            btn:SetBackdropColor(0.2, 0.2, 0.2, 0)
-        end)
-
+        -- Смещение текста при клике
         btn:SetScript("OnMouseDown", function()
-            btnText:SetPoint("LEFT", 9, -1)
+            btn:GetFontString():SetPoint("LEFT", 9, -1)
         end)
-
         btn:SetScript("OnMouseUp", function()
-            btnText:SetPoint("LEFT", 8, 0)
+            btn:GetFontString():SetPoint("LEFT", 8, 0)
         end)
 
         tabButtons[index] = btn
@@ -1816,21 +2060,29 @@ function AEB:ShowSettingsFrame()
     local generalTab = CreateTab("Общие", 1)
 
     -- Создаем ScrollFrame для прокручиваемого контента
-    local scrollFrame = CreateFrame("ScrollFrame", nil, generalTab, "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", 5, -5)
-    scrollFrame:SetPoint("BOTTOMRIGHT", -25, 5)
+    local scrollFrame = CreateFrame("ScrollFrame", "AEBGeneralTabScroll", generalTab, "UIPanelScrollFrameTemplate")
+    scrollFrame:SetPoint("TOPLEFT", 0, 0)
+    scrollFrame:SetPoint("BOTTOMRIGHT", -20, 0)
 
     -- Создаем ScrollChild (контент, который будет прокручиваться)
     local scrollChild = CreateFrame("Frame", nil, scrollFrame)
-    scrollChild:SetSize(scrollFrame:GetWidth() - 10, 600) -- Высота больше для прокрутки
+    scrollChild:SetSize(scrollFrame:GetWidth() - 10, 230) -- Высота по размеру контента (добавлен чекбокс сумок)
     scrollFrame:SetScrollChild(scrollChild)
 
-    local yOffset = -5
+    -- Фон под полосу прокрутки
+    local scrollBar = _G[scrollFrame:GetName() .. "ScrollBar"]
+    if scrollBar then
+        local scrollBarBg = scrollFrame:CreateTexture(nil, "BACKGROUND")
+        scrollBarBg:SetTexture("Interface\\ChatFrame\\ChatFrameBackground")
+        scrollBarBg:SetPoint("TOPLEFT", scrollBar, "TOPLEFT", -2, 2)
+        scrollBarBg:SetPoint("BOTTOMRIGHT", scrollBar, "BOTTOMRIGHT", 2, -2)
+        scrollBarBg:SetVertexColor(0, 0, 0, 0.5)
+    end
 
     -- Чекбокс "Включить автоматическое сравнение"
     local cbAutoSuggest = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
     cbAutoSuggest:SetSize(20, 20)
-    cbAutoSuggest:SetPoint("TOPLEFT", 2, yOffset)
+    cbAutoSuggest:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, 0)
     cbAutoSuggest:SetChecked(self.db.autoSuggest)
     cbAutoSuggest.text = cbAutoSuggest:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     cbAutoSuggest.text:SetPoint("LEFT", cbAutoSuggest, "RIGHT", 5, 0)
@@ -1839,12 +2091,10 @@ function AEB:ShowSettingsFrame()
         AEB.db.autoSuggest = self:GetChecked()
     end)
 
-    yOffset = yOffset - 30
-
     -- Чекбокс "Надевать автоматически"
     local cbAutoEquip = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
     cbAutoEquip:SetSize(20, 20)
-    cbAutoEquip:SetPoint("TOPLEFT", 2, yOffset)
+    cbAutoEquip:SetPoint("TOPLEFT", cbAutoSuggest, "BOTTOMLEFT", 25, -5)
     cbAutoEquip:SetChecked(self.db.autoEquip)
     cbAutoEquip.text = cbAutoEquip:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     cbAutoEquip.text:SetPoint("LEFT", cbAutoEquip, "RIGHT", 5, 0)
@@ -1853,11 +2103,9 @@ function AEB:ShowSettingsFrame()
         AEB.db.autoEquip = self:GetChecked()
     end)
 
-    yOffset = yOffset - 30
-
     -- Задержка автоэкипировки
     local delayLabel = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    delayLabel:SetPoint("TOPLEFT", 2, yOffset)
+    delayLabel:SetPoint("TOPLEFT", cbAutoEquip, "BOTTOMLEFT", -25, -10)
     delayLabel:SetText("Задержка автоэкипировки (сек):")
 
     local delayInput = CreateFrame("EditBox", nil, scrollChild, "InputBoxTemplate")
@@ -1875,15 +2123,13 @@ function AEB:ShowSettingsFrame()
         self:ClearFocus()
     end)
 
-    yOffset = yOffset - 30
-
     -- Расположение окна
     local posLabel = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    posLabel:SetPoint("TOPLEFT", 2, yOffset)
+    posLabel:SetPoint("TOPLEFT", delayLabel, "BOTTOMLEFT", 0, -15)
     posLabel:SetText("Расположение окна:")
 
     local btnChangePos = CreateFrame("Button", nil, scrollChild, "UIPanelButtonTemplate")
-    btnChangePos:SetSize(100, 25)
+    btnChangePos:SetSize(80, 25)
     btnChangePos:SetPoint("LEFT", posLabel, "RIGHT", 10, 0)
     btnChangePos:SetText("Изменить")
     btnChangePos:SetScript("OnClick", function()
@@ -1896,8 +2142,8 @@ function AEB:ShowSettingsFrame()
     end)
 
     local btnResetPos = CreateFrame("Button", nil, scrollChild, "UIPanelButtonTemplate")
-    btnResetPos:SetSize(100, 25)
-    btnResetPos:SetPoint("LEFT", btnChangePos, "RIGHT", 10, 0)
+    btnResetPos:SetSize(80, 25)
+    btnResetPos:SetPoint("LEFT", btnChangePos, "RIGHT", 5, 0)
     btnResetPos:SetText("Сбросить")
     btnResetPos:SetScript("OnClick", function()
         AEB.db.framePos = { point = "CENTER", x = 0, y = 0 }
@@ -1908,12 +2154,10 @@ function AEB:ShowSettingsFrame()
         print("|cff00ff00Позиция окна сброшена|r")
     end)
 
-    yOffset = yOffset - 40
-
     -- Чекбокс "Автоэкипировка боеприпасов"
     local cbAutoEquipAmmo = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
     cbAutoEquipAmmo:SetSize(20, 20)
-    cbAutoEquipAmmo:SetPoint("TOPLEFT", 2, yOffset)
+    cbAutoEquipAmmo:SetPoint("TOPLEFT", posLabel, "BOTTOMLEFT", 0, -10)
     cbAutoEquipAmmo:SetChecked(self.db.autoEquipAmmo)
     cbAutoEquipAmmo.text = cbAutoEquipAmmo:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     cbAutoEquipAmmo.text:SetPoint("LEFT", cbAutoEquipAmmo, "RIGHT", 5, 0)
@@ -1922,18 +2166,28 @@ function AEB:ShowSettingsFrame()
         AEB.db.autoEquipAmmo = self:GetChecked()
     end)
 
-    yOffset = yOffset - 30
-
     -- Чекбокс "Приоритет качества боеприпасов" (дочерний)
     local cbAmmoBestQuality = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
     cbAmmoBestQuality:SetSize(20, 20)
-    cbAmmoBestQuality:SetPoint("TOPLEFT", 22, yOffset) -- Отступ 20px для визуальной иерархии
+    cbAmmoBestQuality:SetPoint("TOPLEFT", cbAutoEquipAmmo, "BOTTOMLEFT", 25, -5)
     cbAmmoBestQuality:SetChecked(self.db.ammoBestQuality)
     cbAmmoBestQuality.text = cbAmmoBestQuality:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     cbAmmoBestQuality.text:SetPoint("LEFT", cbAmmoBestQuality, "RIGHT", 5, 0)
     cbAmmoBestQuality.text:SetText("Приоритет лучшего качества")
     cbAmmoBestQuality:SetScript("OnClick", function(self)
         AEB.db.ammoBestQuality = self:GetChecked()
+    end)
+
+    -- Чекбокс "Автоэкипировка сумок"
+    local cbAutoEquipBags = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
+    cbAutoEquipBags:SetSize(20, 20)
+    cbAutoEquipBags:SetPoint("TOPLEFT", cbAmmoBestQuality, "BOTTOMLEFT", -25, -5)
+    cbAutoEquipBags:SetChecked(self.db.autoEquipBags)
+    cbAutoEquipBags.text = cbAutoEquipBags:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    cbAutoEquipBags.text:SetPoint("LEFT", cbAutoEquipBags, "RIGHT", 5, 0)
+    cbAutoEquipBags.text:SetText("Автоматически экипировать сумки")
+    cbAutoEquipBags:SetScript("OnClick", function(self)
+        AEB.db.autoEquipBags = self:GetChecked()
     end)
 
     -- === ВКЛАДКА "ИСКЛЮЧЕНИЯ" ===
@@ -1946,7 +2200,7 @@ function AEB:ShowSettingsFrame()
     -- Скролл для списка (упрощённый без шаблона)
     local scrollFrame = CreateFrame("ScrollFrame", "AEBBlacklistScroll", exceptionsTab)
     scrollFrame:SetSize(340, 200)
-    scrollFrame:SetPoint("TOPLEFT", 2, -30)
+    scrollFrame:SetPoint("TOPLEFT", listLabel, "BOTTOMLEFT", 0, -5)
 
     -- Фон для скролла
     scrollFrame:SetBackdrop({
@@ -1958,7 +2212,7 @@ function AEB:ShowSettingsFrame()
     scrollFrame:SetBackdropColor(0, 0, 0, 0.5)
 
     local scrollChild = CreateFrame("Frame", nil, scrollFrame)
-    scrollChild:SetSize(400, 200)
+    scrollChild:SetSize(320, 200)
     scrollFrame:SetScrollChild(scrollChild)
 
     -- Слайдер для прокрутки
@@ -1969,8 +2223,28 @@ function AEB:ShowSettingsFrame()
     scrollBar:SetValueStep(20)
     scrollBar:SetValue(0)
     scrollBar:SetWidth(16)
+    scrollBar:Enable()
     scrollBar:SetScript("OnValueChanged", function(self, value)
         scrollFrame:SetVerticalScroll(value)
+    end)
+
+    -- Фон под полосу прокрутки
+    local scrollBarBg = scrollFrame:CreateTexture(nil, "BACKGROUND")
+    scrollBarBg:SetTexture("Interface\\ChatFrame\\ChatFrameBackground")
+    scrollBarBg:SetPoint("TOPLEFT", scrollBar, "TOPLEFT", -2, 2)
+    scrollBarBg:SetPoint("BOTTOMRIGHT", scrollBar, "BOTTOMRIGHT", 2, -2)
+    scrollBarBg:SetVertexColor(0, 0, 0, 0.5)
+
+    -- Поддержка прокрутки колесиком мыши
+    scrollFrame:EnableMouseWheel(true)
+    scrollFrame:SetScript("OnMouseWheel", function(self, delta)
+        local current = scrollBar:GetValue()
+        local minVal, maxVal = scrollBar:GetMinMaxValues()
+        if delta > 0 then
+            scrollBar:SetValue(math.max(minVal, current - 20))
+        else
+            scrollBar:SetValue(math.min(maxVal, current + 20))
+        end
     end)
 
     local listItems = {}
@@ -1993,8 +2267,8 @@ function AEB:ShowSettingsFrame()
 
         for i, data in ipairs(sortedList) do
             local btn = CreateFrame("Button", nil, scrollChild)
-            btn:SetSize(400, 20)
-            btn:SetPoint("TOPLEFT", 0, -(i - 1) * 20)
+            btn:SetSize(315, 18)
+            btn:SetPoint("TOPLEFT", 3, -3 - (i - 1) * 20)
 
             local r, g, b = GetItemQualityColor(data.quality)
             btn.text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -2015,6 +2289,24 @@ function AEB:ShowSettingsFrame()
                 btn:SetBackdropColor(0.3, 0.3, 0.3, 0.5)
             end)
 
+            -- Подсветка при наведении
+            btn:SetScript("OnEnter", function()
+                if selectedItem ~= data.id then
+                    btn:SetBackdrop({
+                        bgFile = "Interface\\Buttons\\WHITE8X8",
+                        edgeFile = nil,
+                        tile = false
+                    })
+                    btn:SetBackdropColor(0.2, 0.2, 0.2, 0.3)
+                end
+            end)
+
+            btn:SetScript("OnLeave", function()
+                if selectedItem ~= data.id then
+                    btn:SetBackdrop(nil)
+                end
+            end)
+
             table.insert(listItems, btn)
         end
 
@@ -2029,23 +2321,32 @@ function AEB:ShowSettingsFrame()
     -- Кнопки управления
     local btnRemove = CreateFrame("Button", nil, exceptionsTab, "UIPanelButtonTemplate")
     btnRemove:SetSize(100, 25)
-    btnRemove:SetPoint("TOPLEFT", 2, -245)
+    btnRemove:SetPoint("TOPLEFT", scrollFrame, "BOTTOMLEFT", 0, -5)
     btnRemove:SetText("Удалить")
     btnRemove:SetScript("OnClick", function()
         if selectedItem then
+            local itemName = GetItemInfo(selectedItem)
             AEB.db.blacklist[selectedItem] = nil
-            print("|cff00ff00Предмет удалён из чёрного списка|r")
+            if itemName then
+                print("|cff00ff00Предмет удалён из чёрного списка: |r" .. itemName)
+            else
+                print("|cff00ff00Предмет удалён из чёрного списка|r")
+            end
             RefreshBlacklist()
         end
     end)
 
     local addLabel = exceptionsTab:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    addLabel:SetPoint("TOPLEFT", 2, -285)
+    addLabel:SetPoint("TOPLEFT", btnRemove, "BOTTOMLEFT", 0, -10)
     addLabel:SetText("Введите название предмета для добавления:")
+
+    local addHint = exceptionsTab:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    addHint:SetPoint("TOPLEFT", addLabel, "BOTTOMLEFT", 0, -2)
+    addHint:SetText("|cff888888(Shift+ЛКМ на предмете для вставки названия)|r")
 
     local addInput = CreateFrame("EditBox", nil, exceptionsTab)
     addInput:SetSize(230, 32)
-    addInput:SetPoint("TOPLEFT", 2, -310)
+    addInput:SetPoint("TOPLEFT", addHint, "BOTTOMLEFT", 0, -5)
     addInput:SetAutoFocus(false)
     addInput:SetFontObject("ChatFontNormal")
     addInput:SetMaxLetters(50)
@@ -2078,8 +2379,8 @@ function AEB:ShowSettingsFrame()
     end
 
     local btnAdd = CreateFrame("Button", nil, exceptionsTab, "UIPanelButtonTemplate")
-    btnAdd:SetSize(100, 32)
-    btnAdd:SetPoint("TOPRIGHT", scrollFrame, "BOTTOMRIGHT", 0, -80)
+    btnAdd:SetSize(105, 32)
+    btnAdd:SetPoint("LEFT", addInput, "RIGHT", 5, 0)
     btnAdd:SetText("Добавить")
     btnAdd:SetScript("OnClick", function()
         local itemName = addInput:GetText():trim()
@@ -2094,6 +2395,13 @@ function AEB:ShowSettingsFrame()
                         if name and name:lower() == itemName:lower() then
                             local itemId = link:match("item:(%d+)")
                             if itemId then
+                                -- Проверка на дубликат
+                                if AEB.db.blacklist[itemId] then
+                                    print("|cffff8800Предмет уже в чёрном списке: |r" .. name)
+                                    addInput:SetText("")
+                                    found = true
+                                    return
+                                end
                                 AEB.db.blacklist[itemId] = true
                                 print("|cff00ff00Предмет добавлен в чёрный список: |r" .. name)
                                 addInput:SetText("")
@@ -2115,6 +2423,13 @@ function AEB:ShowSettingsFrame()
                         if name and name:lower() == itemName:lower() then
                             local itemId = link:match("item:(%d+)")
                             if itemId then
+                                -- Проверка на дубликат
+                                if AEB.db.blacklist[itemId] then
+                                    print("|cffff8800Предмет уже в чёрном списке: |r" .. name)
+                                    addInput:SetText("")
+                                    found = true
+                                    return
+                                end
                                 AEB.db.blacklist[itemId] = true
                                 print("|cff00ff00Предмет добавлен в чёрный список: |r" .. name)
                                 addInput:SetText("")
