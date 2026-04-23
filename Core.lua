@@ -1,4 +1,4 @@
--- Аддон AutoEquipBetter v0.11.7a для World of Warcraft 3.3.5a
+-- Аддон AutoEquipBetter v0.11.8a для World of Warcraft 3.3.5a
 --== Важная информация: ==--
 -- Для определения возможности надеть предмет на персонажа нельзя использовать функцию IsUsableItem и поиск красного цвета в тексте подсказки, потому что это не даёт нужного результата. Для точного определения типа и подтипа оружия и брони нужно использовать GetItemInfo(id), а для определения возможности надевания - чтение оружейных и доспеховых навыков персонажа.
 -- Координаты стрелок относительно иконок и другие подобные визуальные элементы менять не нужно без явного указания. Я настроил их вручную.
@@ -7,7 +7,7 @@ local AEB = LibStub("AceAddon-3.0"):NewAddon("AutoEquipBetter", "AceEvent-3.0", 
 local scanner = CreateFrame("GameTooltip", "AEBScanner", nil, "GameTooltipTemplate")
 scanner:SetOwner(WorldFrame, "ANCHOR_NONE")
 
-AEB_DEBUG_MODE = 1 -- Дебаггер (глобальная переменная)
+AEB_DEBUG_MODE = 0 -- Дебаггер (глобальная переменная, по умолчанию выключен)
 
 -- Веса характеристик: [Класс] -> [Ветка талантов (1, 2, 3)]
 local classStatWeights = {
@@ -286,6 +286,9 @@ local bagUpdateTimer = 0
 local bagUpdatePending = false
 local enterWorldTimer = 0
 local enterWorldPending = false
+local isEquippingBag = false -- Флаг для защиты от повторных вызовов EquipBestBags
+local bagEquipTimer = 0 -- Таймер для задержки автоэкипировки сумок
+local bagEquipPending = false -- Флаг ожидания автоэкипировки сумок
 
 -- Переменные для квестовых стрелок (должны быть доступны глобально)
 local questRewardDelayTimer = 0
@@ -323,6 +326,16 @@ updateFrame:SetScript("OnUpdate", function(self, elapsed)
             if AEB.db.autoSuggest then
                 AEB:CheckAndSuggestUpgrades()
             end
+        end
+    end
+
+    -- Обработка задержки автоэкипировки сумок
+    if bagEquipPending then
+        bagEquipTimer = bagEquipTimer + elapsed
+        if bagEquipTimer >= 1.0 then
+            bagEquipPending = false
+            bagEquipTimer = 0
+            AEB:EquipBestBags()
         end
     end
 end)
@@ -375,8 +388,9 @@ function AEB:EquipBestAmmo()
 end
 
 -- === ФУНКЦИИ ДЛЯ РАБОТЫ С СУМКАМИ ===
--- Слоты для сумок: 19, 20, 21, 22 (ContainerID 1, 2, 3, 4)
-local BAG_SLOTS = {19, 20, 21, 22}
+-- Слоты для сумок: 20, 21, 22, 23 (ContainerID 1, 2, 3, 4)
+-- Слот 19 - это табард (Tabard), не сумка!
+local BAG_SLOTS = {20, 21, 22, 23}
 
 function AEB:FindBestBag()
     local bestBag = nil
@@ -422,27 +436,108 @@ function AEB:EquipBestBags()
         return
     end
 
-    -- Ищем первый пустой слот для сумки
+    -- Защита от повторных вызовов
+    if isEquippingBag then
+        if AEB_DEBUG_MODE == 1 then
+            print("|cff00ffffDEBUG: EquipBestBags - уже выполняется, пропускаем|r")
+        end
+        return
+    end
+
+    -- Подсчитываем количество надетых сумок через GetContainerNumSlots
+    local equippedBagsCount = 0
+    for i = 1, 4 do -- Контейнеры 1-4 соответствуют слотам 19-22
+        local numSlots = GetContainerNumSlots(i)
+        if numSlots and numSlots > 0 then
+            equippedBagsCount = equippedBagsCount + 1
+        end
+    end
+
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: EquipBestBags - equippedBagsCount=" .. equippedBagsCount .. " (через GetContainerNumSlots)|r")
+    end
+
+    -- Если все 4 слота заняты - выходим
+    if equippedBagsCount >= 4 then
+        if AEB_DEBUG_MODE == 1 then
+            print("|cff00ffffDEBUG: EquipBestBags - все слоты заняты, выходим|r")
+        end
+        return
+    end
+
+    -- Сначала проверяем, есть ли пустые слоты для сумок
+    local hasEmptySlot = false
+    for _, bagSlot in ipairs(BAG_SLOTS) do
+        local itemID = GetInventoryItemID("player", bagSlot)
+        local equippedLink = GetInventoryItemLink("player", bagSlot)
+        if AEB_DEBUG_MODE == 1 then
+            print("|cff00ffffDEBUG: EquipBestBags - слот " .. bagSlot .. ": itemID=" .. tostring(itemID) .. ", link=" .. tostring(equippedLink or "nil") .. "|r")
+        end
+        -- Слот считается пустым только если нет ни ID, ни ссылки
+        if not itemID and not equippedLink then
+            hasEmptySlot = true
+            break
+        end
+    end
+
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: EquipBestBags - hasEmptySlot=" .. tostring(hasEmptySlot) .. "|r")
+    end
+
+    -- Если нет пустых слотов - выходим
+    if not hasEmptySlot then
+        return
+    end
+
+    -- Ищем сумку в инвентаре
+    local bestBag = self:FindBestBag()
+
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: EquipBestBags - bestBag=" .. tostring(bestBag and bestBag.link or "nil") .. "|r")
+    end
+
+    if not bestBag then
+        -- Нет сумок в инвентаре - выходим
+        return
+    end
+
+    -- Устанавливаем флаг
+    isEquippingBag = true
+
+    -- Ищем первый пустой слот и надеваем сумку
     for _, bagSlot in ipairs(BAG_SLOTS) do
         local equippedLink = GetInventoryItemLink("player", bagSlot)
 
-        -- Если слот пустой
         if not equippedLink then
-            -- Ищем любую сумку в инвентаре
-            local bestBag = self:FindBestBag()
-            if bestBag then
-                ClearCursor()
-                PickupContainerItem(bestBag.bag, bestBag.slot)
-
-                if CursorHasItem() then
-                    EquipCursorItem(bagSlot)
-                end
-
-                -- Надеваем только ОДНУ сумку за раз
-                return
+            if AEB_DEBUG_MODE == 1 then
+                print("|cff00ffffDEBUG: EquipBestBags - Надеваем сумку в слот " .. bagSlot .. "|r")
             end
+
+            ClearCursor()
+            PickupContainerItem(bestBag.bag, bestBag.slot)
+
+            if CursorHasItem() then
+                EquipCursorItem(bagSlot)
+            end
+
+            -- Сбрасываем флаг через небольшую задержку (используем OnUpdate)
+            local resetFrame = CreateFrame("Frame")
+            local resetTimer = 0
+            resetFrame:SetScript("OnUpdate", function(self, elapsed)
+                resetTimer = resetTimer + elapsed
+                if resetTimer >= 0.5 then
+                    isEquippingBag = false
+                    self:SetScript("OnUpdate", nil)
+                end
+            end)
+
+            -- Надеваем только ОДНУ сумку за раз
+            return
         end
     end
+
+    -- Если не нашли пустой слот (не должно произойти), сбрасываем флаг
+    isEquippingBag = false
 end
 
 function AEB:OnInitialize()
@@ -466,6 +561,8 @@ function AEB:OnInitialize()
     self:RegisterEvent("MERCHANT_SHOW")
     self:RegisterEvent("MERCHANT_UPDATE")
     self:RegisterEvent("MERCHANT_CLOSED")
+    self:RegisterEvent("LOOT_OPENED")
+    self:RegisterEvent("LOOT_CLOSED")
     self:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 	self:RegisterEvent("TRADE_SKILL_SHOW")
     self:RegisterEvent("QUEST_DETAIL")
@@ -634,6 +731,15 @@ function AEB:OnInitialize()
         msg = strtrim(msg:lower())
         if msg == "equip" then
             AEB:CheckAndSuggestUpgrades()
+        elseif msg == "debug" then
+            -- Переключение режима отладки
+            if AEB_DEBUG_MODE == 1 then
+                AEB_DEBUG_MODE = 0
+                print("|cff00ff00AutoEquipBetter:|r Режим отладки |cffff0000выключен|r")
+            else
+                AEB_DEBUG_MODE = 1
+                print("|cff00ff00AutoEquipBetter:|r Режим отладки |cff00ff00включён|r")
+            end
         else
             AEB:ShowSettingsFrame()
         end
@@ -654,18 +760,22 @@ function AEB:BAG_UPDATE()
 
     -- Автоэкипировка боеприпасов
     self:EquipBestAmmo()
-    -- Автоэкипировка сумок
-    self:EquipBestBags()
+    -- Автоэкипировка сумок (с задержкой)
+    bagEquipPending = true
+    bagEquipTimer = 0
 end
 function AEB:MERCHANT_SHOW() isDirty = true end
 function AEB:MERCHANT_UPDATE() isDirty = true end
 function AEB:MERCHANT_CLOSED() isDirty = true; self:ReleaseAllArrows() end
+function AEB:LOOT_OPENED() isDirty = true end
+function AEB:LOOT_CLOSED() isDirty = true; self:ReleaseAllArrows() end
 function AEB:PLAYER_EQUIPMENT_CHANGED()
     isDirty = true
     -- Автоэкипировка боеприпасов при смене оружия
     self:EquipBestAmmo()
-    -- Автоэкипировка сумок
-    self:EquipBestBags()
+    -- Автоэкипировка сумок (с задержкой)
+    bagEquipPending = true
+    bagEquipTimer = 0
     -- Обновляем квестовые стрелки при смене экипировки
     if (QuestLogFrame and QuestLogFrame:IsVisible()) or (QuestLogDetailFrame and QuestLogDetailFrame:IsVisible()) or (QuestFrame and QuestFrame:IsVisible()) then
         questRewardDelayPending = true
@@ -1172,6 +1282,78 @@ function AEB:RefreshArrows()
                 arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 5, -3)
                 arrow:SetFrameLevel(btn:GetFrameLevel() + 5)
                 arrow:Show()
+            end
+        end
+    end
+
+    -- Анализируем предметы в окне добычи
+    local bestLoot = {}
+    if LootFrame and LootFrame:IsVisible() then
+        local numLootItems = GetNumLootItems()
+        if AEB_DEBUG_MODE == 1 then
+            print("[AEB] Loot window opened, items:", numLootItems)
+        end
+        for i = 1, numLootItems do
+            if AEB_DEBUG_MODE == 1 then
+                print("[AEB] Loot slot", i, "isItem:", LootSlotIsItem(i) and "yes" or "no", "isCoin:", LootSlotIsCoin(i) and "yes" or "no")
+            end
+            if LootSlotIsItem(i) then -- Проверяем, что это предмет (не монеты)
+                local lootIcon, lootName, lootQuantity, currencyID, lootQuality = GetLootSlotInfo(i)
+                local link = GetLootSlotLink(i)
+                if AEB_DEBUG_MODE == 1 then
+                    print("[AEB] Loot slot", i, "link:", link or "no link", "name:", lootName or "nil")
+                end
+                if link and IsEquippableItem(link) then
+                    local _, _, _, _, minLvl, itemType, subType, _, loc = GetItemInfo(link)
+                    if AEB_DEBUG_MODE == 1 then
+                        print("[AEB] Equippable item:", lootName, "loc:", loc)
+                    end
+                    if loc and equipSlotMap[loc] then
+                        if (not minLvl or minLvl <= UnitLevel("player")) and self:CanPlayerWear(itemType, subType) then
+                            local score = self:GetScoreForLink(link)
+                            local isUp, newS = self:GetUpgradeInfo(link, loc, score)
+
+                            if isUp then
+                                local slotId = equipSlotMap[loc]
+                                if AEB_DEBUG_MODE == 1 then
+                                    print("[AEB] Found upgrade in loot:", lootName, "score:", newS)
+                                end
+                                -- Сравниваем между собой предметы для одного слота
+                                if not bestLoot[slotId] or newS > bestLoot[slotId].newS then
+                                    bestLoot[slotId] = { index = i, score = score, loc = loc, newS = newS }
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Отображаем стрелки на предметах в окне добычи
+    for slotId, data in pairs(bestLoot) do
+        -- Пересчитываем индекс кнопки с учётом текущей страницы
+        local numLootToShow = 4
+        if LootFrame.numLootItems and LootFrame.numLootItems > 4 then
+            numLootToShow = 3
+        end
+        local page = LootFrame.page or 1
+        local buttonIndex = data.index - ((page - 1) * numLootToShow)
+
+        if buttonIndex > 0 and buttonIndex <= numLootToShow then
+            local btn = _G["LootButton"..buttonIndex]
+            if AEB_DEBUG_MODE == 1 then
+                print("[AEB] Slot", data.index, "-> Button", buttonIndex, "visible:", btn and btn:IsVisible() or "nil")
+            end
+            if btn and btn:IsVisible() then
+                local arrow = self:GetArrowFrame()
+                arrow:SetParent(btn)
+                arrow:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 5, -3)
+                arrow:SetFrameLevel(btn:GetFrameLevel() + 5)
+                arrow:Show()
+                if AEB_DEBUG_MODE == 1 then
+                    print("[AEB] Arrow shown on LootButton"..buttonIndex)
+                end
             end
         end
     end
@@ -2185,7 +2367,7 @@ function AEB:ShowSettingsFrame()
     cbAutoEquipBags:SetChecked(self.db.autoEquipBags)
     cbAutoEquipBags.text = cbAutoEquipBags:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     cbAutoEquipBags.text:SetPoint("LEFT", cbAutoEquipBags, "RIGHT", 5, 0)
-    cbAutoEquipBags.text:SetText("Автоматически экипировать сумки")
+    cbAutoEquipBags.text:SetText("Автоматически экипировать сумки в пустые слоты")
     cbAutoEquipBags:SetScript("OnClick", function(self)
         AEB.db.autoEquipBags = self:GetChecked()
     end)
