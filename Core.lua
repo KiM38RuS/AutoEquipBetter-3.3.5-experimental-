@@ -1,4 +1,4 @@
--- Аддон AutoEquipBetter v0.11.11a для World of Warcraft 3.3.5a
+-- Аддон AutoEquipBetter v0.11.12a для World of Warcraft 3.3.5a
 --== Важная информация: ==--
 -- Для определения возможности надеть предмет на персонажа нельзя использовать функцию IsUsableItem и поиск красного цвета в тексте подсказки, потому что это не даёт нужного результата. Для точного определения типа и подтипа оружия и брони нужно использовать GetItemInfo(id), а для определения возможности надевания - чтение оружейных и доспеховых навыков персонажа.
 -- Координаты стрелок относительно иконок и другие подобные визуальные элементы менять не нужно без явного указания. Я настроил их вручную.
@@ -1021,6 +1021,14 @@ function AEB:BAG_UPDATE()
         bagUpdatePending = true
     end
 
+    -- Обновление маркера в окне профессий (если рецепт выбран)
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: BAG_UPDATE - TradeSkillFrame=" .. tostring(TradeSkillFrame) .. ", selectedSkill=" .. tostring(TradeSkillFrame and TradeSkillFrame.selectedSkill) .. "|r")
+    end
+    if TradeSkillFrame and TradeSkillFrame.selectedSkill then
+        self:UpdateTradeSkillArrow(TradeSkillFrame.selectedSkill)
+    end
+
     -- Обновление информации о сумке в окне сравнения (если оно открыто)
     if mainFrame and mainFrame:IsVisible() and mainFrame.currentItem then
         local q = mainFrame.currentItem
@@ -1044,9 +1052,31 @@ function AEB:BAG_UPDATE()
     bagEquipPending = true
     bagEquipTimer = 0
 end
-function AEB:MERCHANT_SHOW() isDirty = true end
-function AEB:MERCHANT_UPDATE() isDirty = true end
-function AEB:MERCHANT_CLOSED() isDirty = true; self:ReleaseAllArrows() end
+function AEB:MERCHANT_SHOW()
+    isDirty = true
+
+    -- Обновление маркера в окне профессий (если рецепт выбран)
+    if TradeSkillFrame and TradeSkillFrame.selectedSkill then
+        self:UpdateTradeSkillArrow(TradeSkillFrame.selectedSkill)
+    end
+end
+function AEB:MERCHANT_UPDATE()
+    isDirty = true
+
+    -- Обновление маркера в окне профессий (если рецепт выбран)
+    if TradeSkillFrame and TradeSkillFrame.selectedSkill then
+        self:UpdateTradeSkillArrow(TradeSkillFrame.selectedSkill)
+    end
+end
+function AEB:MERCHANT_CLOSED()
+    isDirty = true
+    self:ReleaseAllArrows()
+
+    -- Обновление маркера в окне профессий (если рецепт выбран)
+    if TradeSkillFrame and TradeSkillFrame.selectedSkill then
+        self:UpdateTradeSkillArrow(TradeSkillFrame.selectedSkill)
+    end
+end
 function AEB:LOOT_OPENED() isDirty = true end
 function AEB:LOOT_CLOSED() isDirty = true; self:ReleaseAllArrows() end
 function AEB:PLAYER_EQUIPMENT_CHANGED()
@@ -1215,7 +1245,7 @@ end
 local mainHandLocs = { ["INVTYPE_WEAPONMAINHAND"] = true, ["INVTYPE_WEAPON"] = true, ["INVTYPE_2HWEAPON"] = true }
 local offHandLocs = { ["INVTYPE_WEAPONOFFHAND"] = true, ["INVTYPE_WEAPON"] = true, ["INVTYPE_SHIELD"] = true, ["INVTYPE_HOLDABLE"] = true, ["INVTYPE_2HWEAPON"] = true }
 
-function AEB:GetBestItemFromBags(allowedLocs)
+function AEB:GetBestItemFromBags(allowedLocs, excludeItemID)
     local bestScore = 0
     local bestLink = nil
     for bag = 0, 4 do
@@ -1223,7 +1253,7 @@ function AEB:GetBestItemFromBags(allowedLocs)
             local link = GetContainerItemLink(bag, slot)
             if link and IsEquippableItem(link) then
                 local id = link:match("item:(%d+)")
-                if id and not self.db.blacklist[id] then
+                if id and not self.db.blacklist[id] and id ~= excludeItemID then
                     local _, _, _, _, minLvl, itemType, subType, _, loc = GetItemInfo(link)
                     if allowedLocs[loc] and (not minLvl or minLvl <= UnitLevel("player")) and self:CanPlayerWear(itemType, subType) then
                         -- Дополнительная проверка: если ищем для offhand и это одноручное оружие
@@ -1257,6 +1287,11 @@ function AEB:GetUpgradeInfo(newItemLink, loc, newItemScore)
         local eqOHLink = GetInventoryItemLink("player", 17)
         local eqMHScore = self:GetScoreForLink(eqMHLink)
         local eqOHScore = self:GetScoreForLink(eqOHLink)
+
+        if AEB_DEBUG_MODE == 1 then
+            print("|cff00ffffDEBUG: GetUpgradeInfo - проверяем предмет (score=" .. newItemScore .. ", loc=" .. loc .. ")|r")
+            print("|cff00ffffDEBUG: Экипировано: MH score=" .. eqMHScore .. ", OH score=" .. eqOHScore .. "|r")
+        end
 
         local isEqMH2H = false
         if eqMHLink then
@@ -1293,20 +1328,48 @@ function AEB:GetUpgradeInfo(newItemLink, loc, newItemScore)
         end
 
         if isEqMH2H and not hasTitansGrip then
+            -- Если экипирован двуручник, проверяем возможность комбо из одноручников
+            local canDW = self:CanDualWield()
+
+            if not canDW then
+                -- Без Dual Wield одноручник может заменить только mainhand
+                -- Сравниваем напрямую с двуручником без поиска пары
+                if mainHandLocs[loc] or (loc == "INVTYPE_WEAPON") then
+                    if AEB_DEBUG_MODE == 1 then
+                        print("|cff00ffffDEBUG: Нет DW, сравниваем 1H (" .. newItemScore .. ") с 2H (" .. eqMHScore .. ") -> " .. (newItemScore > eqMHScore and "АПГРЕЙД" or "НЕ апгрейд") .. "|r")
+                    end
+                    if newItemScore > eqMHScore then
+                        return true, newItemScore, eqMHScore, eqMHLink, nil, nil, false
+                    end
+                end
+                return false
+            end
+
+            -- С Dual Wield ищем комбо из двух одноручников
             local comboScore = newItemScore
             local companionLink = nil
+            local currentItemID = newItemLink:match("item:(%d+)")
 
             if mainHandLocs[loc] and not offHandLocs[loc] then
-                local ohScore, ohLink = self:GetBestItemFromBags(offHandLocs)
+                local ohScore, ohLink = self:GetBestItemFromBags(offHandLocs, currentItemID)
                 comboScore = comboScore + ohScore
                 companionLink = ohLink
+                if AEB_DEBUG_MODE == 1 then
+                    print("|cff00ffffDEBUG: MH-only предмет, ищем OH пару: score=" .. ohScore .. "|r")
+                end
             elseif offHandLocs[loc] and not mainHandLocs[loc] then
-                local mhScore, mhLink = self:GetBestItemFromBags(mainHandLocs)
+                local mhScore, mhLink = self:GetBestItemFromBags(mainHandLocs, currentItemID)
                 comboScore = comboScore + mhScore
                 companionLink = mhLink
+                if AEB_DEBUG_MODE == 1 then
+                    print("|cff00ffffDEBUG: OH-only предмет, ищем MH пару: score=" .. mhScore .. "|r")
+                end
             else
-                local ohScore, ohLink = self:GetBestItemFromBags(offHandLocs)
-                local mhScore, mhLink = self:GetBestItemFromBags(mainHandLocs)
+                local ohScore, ohLink = self:GetBestItemFromBags(offHandLocs, currentItemID)
+                local mhScore, mhLink = self:GetBestItemFromBags(mainHandLocs, currentItemID)
+                if AEB_DEBUG_MODE == 1 then
+                    print("|cff00ffffDEBUG: Универсальный предмет, ищем пару: OH score=" .. ohScore .. ", MH score=" .. mhScore .. "|r")
+                end
                 if ohScore >= mhScore then
                     comboScore = comboScore + ohScore
                     companionLink = ohLink
@@ -1314,6 +1377,10 @@ function AEB:GetUpgradeInfo(newItemLink, loc, newItemScore)
                     comboScore = comboScore + mhScore
                     companionLink = mhLink
                 end
+            end
+
+            if AEB_DEBUG_MODE == 1 then
+                print("|cff00ffffDEBUG: Комбо score=" .. comboScore .. " vs экипированный 2H score=" .. eqMHScore .. " -> " .. (comboScore > eqMHScore and "АПГРЕЙД" or "НЕ апгрейд") .. "|r")
             end
 
             if comboScore > eqMHScore then
@@ -1324,13 +1391,22 @@ function AEB:GetUpgradeInfo(newItemLink, loc, newItemScore)
         end
 
         if loc == "INVTYPE_WEAPONMAINHAND" then
+            if AEB_DEBUG_MODE == 1 then
+                print("|cff00ffffDEBUG: WEAPONMAINHAND: " .. newItemScore .. " vs " .. eqMHScore .. " -> " .. (newItemScore > eqMHScore and "АПГРЕЙД" or "НЕ апгрейд") .. "|r")
+            end
             if newItemScore > eqMHScore then return true, newItemScore, eqMHScore, eqMHLink, nil, nil, false end
         elseif loc == "INVTYPE_WEAPONOFFHAND" or loc == "INVTYPE_SHIELD" or loc == "INVTYPE_HOLDABLE" then
+            if AEB_DEBUG_MODE == 1 then
+                print("|cff00ffffDEBUG: OFFHAND/SHIELD: " .. newItemScore .. " vs " .. eqOHScore .. " -> " .. (newItemScore > eqOHScore and "АПГРЕЙД" or "НЕ апгрейд") .. "|r")
+            end
             if newItemScore > eqOHScore then return true, newItemScore, eqOHScore, eqOHLink, nil, nil, false end
         elseif loc == "INVTYPE_WEAPON" then
             -- Проверяем способность носить оружие в левой руке
             if not self:CanDualWield() then
                 -- Без Dual Wield одноручное оружие может быть только в mainhand
+                if AEB_DEBUG_MODE == 1 then
+                    print("|cff00ffffDEBUG: WEAPON (без DW): " .. newItemScore .. " vs MH " .. eqMHScore .. " -> " .. (newItemScore > eqMHScore and "АПГРЕЙД" or "НЕ апгрейд") .. "|r")
+                end
                 if newItemScore > eqMHScore then
                     return true, newItemScore, eqMHScore, eqMHLink, nil, nil, false
                 end
@@ -1338,6 +1414,9 @@ function AEB:GetUpgradeInfo(newItemLink, loc, newItemScore)
                 -- С Dual Wield сравниваем с худшим из двух слотов
                 local targetScore = math.min(eqMHScore, eqOHScore)
                 local targetLink = (eqMHScore <= eqOHScore) and eqMHLink or eqOHLink
+                if AEB_DEBUG_MODE == 1 then
+                    print("|cff00ffffDEBUG: WEAPON (с DW): " .. newItemScore .. " vs min(" .. eqMHScore .. ", " .. eqOHScore .. ")=" .. targetScore .. " -> " .. (newItemScore > targetScore and "АПГРЕЙД" or "НЕ апгрейд") .. "|r")
+                end
                 if newItemScore > targetScore then
                     return true, newItemScore, targetScore, targetLink, nil, nil, false
                 end
@@ -2251,7 +2330,11 @@ function AEB:CreateUI(q)
     end)
 
     mainFrame.btnNo:SetScript("OnClick", function()
-        -- Отмена - просто пропускаем предмет без добавления в чёрный список
+        -- Отмена - пропускаем предмет и добавляем в список недавно обработанных
+        local data = itemQueue[1]
+        if data and data.id then
+            recentlyEquipped[data.id] = true
+        end
         table.remove(itemQueue, 1)
         AEB.queueCurrent = AEB.queueCurrent + 1
         mainFrame:Hide()
@@ -2278,23 +2361,43 @@ end
 function AEB:UpdateTradeSkillArrow(id)
     if not id or not TradeSkillSkillIcon then return end
 
-    -- Выделяем персональную стрелочку для окна крафта, чтобы не зависеть от пула сумок
+    -- Создаём отдельный маркер для профессий (не из общего пула)
     if not self.tsArrow then
-        self.tsArrow = self:GetArrowFrame()
+        self.tsArrow = CreateFrame("Frame", nil, UIParent)
+        self.tsArrow:SetSize(18, 18)
+        self.tsArrow:SetFrameLevel(10)
+        self.tsArrow.texture = self.tsArrow:CreateTexture(nil, "OVERLAY")
+        self.tsArrow.texture:SetAllPoints(self.tsArrow)
+        self.tsArrow.texture:SetTexture("Interface\\AddOns\\AutoEquipBetter\\Pictures\\GreenUpArrow.tga")
     end
     self.tsArrow:Hide()
     self.tsArrow:ClearAllPoints()
 
     local link = GetTradeSkillItemLink(id)
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: UpdateTradeSkillArrow - id=" .. tostring(id) .. ", link=" .. tostring(link) .. "|r")
+    end
+
     if link and IsEquippableItem(link) then
         local _, _, _, _, _, itemType, subType, _, loc = GetItemInfo(link)
+        if AEB_DEBUG_MODE == 1 then
+            print("|cff00ffffDEBUG: UpdateTradeSkillArrow - loc=" .. tostring(loc) .. ", itemType=" .. tostring(itemType) .. "|r")
+        end
+
         if loc and equipSlotMap[loc] and self:CanPlayerWear(itemType, subType) then
             local score = self:GetScoreForLink(link)
             local isUp = self:GetUpgradeInfo(link, loc, score)
+            if AEB_DEBUG_MODE == 1 then
+                print("|cff00ffffDEBUG: UpdateTradeSkillArrow - score=" .. tostring(score) .. ", isUp=" .. tostring(isUp) .. "|r")
+            end
+
             if isUp then
                 self.tsArrow:SetParent(TradeSkillSkillIcon)
                 self.tsArrow:SetPoint("BOTTOMRIGHT", TradeSkillSkillIcon, "BOTTOMRIGHT", 5, -3)
                 self.tsArrow:Show()
+                if AEB_DEBUG_MODE == 1 then
+                    print("|cff00ffffDEBUG: UpdateTradeSkillArrow - маркер показан|r")
+                end
             end
         end
     end
