@@ -1,4 +1,4 @@
--- Аддон AutoEquipBetter v0.11.8a для World of Warcraft 3.3.5a
+-- Аддон AutoEquipBetter v0.11.11a для World of Warcraft 3.3.5a
 --== Важная информация: ==--
 -- Для определения возможности надеть предмет на персонажа нельзя использовать функцию IsUsableItem и поиск красного цвета в тексте подсказки, потому что это не даёт нужного результата. Для точного определения типа и подтипа оружия и брони нужно использовать GetItemInfo(id), а для определения возможности надевания - чтение оружейных и доспеховых навыков персонажа.
 -- Координаты стрелок относительно иконок и другие подобные визуальные элементы менять не нужно без явного указания. Я настроил их вручную.
@@ -261,6 +261,35 @@ local equipSlotMap = {
     ["INVTYPE_RELIC"] = 18, ["INVTYPE_TABARD"] = 19
 }
 
+-- Маппинг типов слотов на текстуры пустых слотов
+local emptySlotTextures = {
+    ["INVTYPE_HEAD"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Head",
+    ["INVTYPE_NECK"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Neck",
+    ["INVTYPE_SHOULDER"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Shoulder",
+    ["INVTYPE_BODY"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Shirt",
+    ["INVTYPE_CHEST"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Chest",
+    ["INVTYPE_ROBE"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Chest",
+    ["INVTYPE_WAIST"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Waist",
+    ["INVTYPE_LEGS"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Legs",
+    ["INVTYPE_FEET"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Feet",
+    ["INVTYPE_WRIST"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Wrists",
+    ["INVTYPE_HAND"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Hands",
+    ["INVTYPE_FINGER"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Finger",
+    ["INVTYPE_TRINKET"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Trinket",
+    ["INVTYPE_CLOAK"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Chest",
+    ["INVTYPE_WEAPON"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-MainHand",
+    ["INVTYPE_2HWEAPON"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-MainHand",
+    ["INVTYPE_WEAPONMAINHAND"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-MainHand",
+    ["INVTYPE_WEAPONOFFHAND"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-SecondaryHand",
+    ["INVTYPE_SHIELD"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-SecondaryHand",
+    ["INVTYPE_HOLDABLE"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-SecondaryHand",
+    ["INVTYPE_RANGED"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Ranged",
+    ["INVTYPE_THROWN"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Ranged",
+    ["INVTYPE_RANGEDRIGHT"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Ranged",
+    ["INVTYPE_RELIC"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Ranged",
+    ["INVTYPE_TABARD"] = "Interface\\PaperDoll\\UI-PaperDoll-Slot-Tabard"
+}
+
 -- Настройки по умолчанию
 local defaultSettings = {
     autoSuggest = true,
@@ -270,7 +299,8 @@ local defaultSettings = {
     blacklist = {},
     autoEquipAmmo = true,
     ammoBestQuality = true,
-    autoEquipBags = true
+    autoEquipBags = true,
+    smartBagReplace = true
 }
 
 local itemQueue = {}
@@ -289,6 +319,8 @@ local enterWorldPending = false
 local isEquippingBag = false -- Флаг для защиты от повторных вызовов EquipBestBags
 local bagEquipTimer = 0 -- Таймер для задержки автоэкипировки сумок
 local bagEquipPending = false -- Флаг ожидания автоэкипировки сумок
+local recentlyEquipped = {} -- Список недавно экипированных предметов (для предотвращения повторных предложений)
+local recentlyEquippedTimer = 0 -- Таймер для очистки списка недавно экипированных предметов
 
 -- Переменные для квестовых стрелок (должны быть доступны глобально)
 local questRewardDelayTimer = 0
@@ -335,8 +367,39 @@ updateFrame:SetScript("OnUpdate", function(self, elapsed)
         if bagEquipTimer >= 1.0 then
             bagEquipPending = false
             bagEquipTimer = 0
-            AEB:EquipBestBags()
+            -- Вызываем EquipBestBags только если в очереди нет предложений замены сумок
+            local hasBagReplacement = false
+            for _, q in ipairs(itemQueue) do
+                if q.isBagReplacement then
+                    hasBagReplacement = true
+                    break
+                end
+            end
+            if AEB_DEBUG_MODE == 1 then
+                print("|cff00ffffDEBUG: bagEquipPending - проверка очереди, hasBagReplacement=" .. tostring(hasBagReplacement) .. ", размер очереди=" .. #itemQueue .. "|r")
+            end
+            if not hasBagReplacement then
+                AEB:EquipBestBags()
+            else
+                if AEB_DEBUG_MODE == 1 then
+                    print("|cff00ff00DEBUG: bagEquipPending - пропускаем EquipBestBags, т.к. есть предложение замены сумки|r")
+                end
+            end
         end
+    end
+
+    -- Очистка списка недавно экипированных предметов через 3 секунды
+    if next(recentlyEquipped) then
+        recentlyEquippedTimer = recentlyEquippedTimer + elapsed
+        if recentlyEquippedTimer >= 3.0 then
+            wipe(recentlyEquipped)
+            recentlyEquippedTimer = 0
+            if AEB_DEBUG_MODE == 1 then
+                print("|cff00ffffDEBUG: Список недавно экипированных предметов очищен|r")
+            end
+        end
+    else
+        recentlyEquippedTimer = 0
     end
 end)
 
@@ -444,28 +507,7 @@ function AEB:EquipBestBags()
         return
     end
 
-    -- Подсчитываем количество надетых сумок через GetContainerNumSlots
-    local equippedBagsCount = 0
-    for i = 1, 4 do -- Контейнеры 1-4 соответствуют слотам 19-22
-        local numSlots = GetContainerNumSlots(i)
-        if numSlots and numSlots > 0 then
-            equippedBagsCount = equippedBagsCount + 1
-        end
-    end
-
-    if AEB_DEBUG_MODE == 1 then
-        print("|cff00ffffDEBUG: EquipBestBags - equippedBagsCount=" .. equippedBagsCount .. " (через GetContainerNumSlots)|r")
-    end
-
-    -- Если все 4 слота заняты - выходим
-    if equippedBagsCount >= 4 then
-        if AEB_DEBUG_MODE == 1 then
-            print("|cff00ffffDEBUG: EquipBestBags - все слоты заняты, выходим|r")
-        end
-        return
-    end
-
-    -- Сначала проверяем, есть ли пустые слоты для сумок
+    -- Проверяем, есть ли пустые слоты для сумок
     local hasEmptySlot = false
     for _, bagSlot in ipairs(BAG_SLOTS) do
         local itemID = GetInventoryItemID("player", bagSlot)
@@ -484,8 +526,11 @@ function AEB:EquipBestBags()
         print("|cff00ffffDEBUG: EquipBestBags - hasEmptySlot=" .. tostring(hasEmptySlot) .. "|r")
     end
 
-    -- Если нет пустых слотов - выходим
+    -- Если нет пустых слотов - выходим (функция работает только для пустых слотов)
     if not hasEmptySlot then
+        if AEB_DEBUG_MODE == 1 then
+            print("|cff00ffffDEBUG: EquipBestBags - нет пустых слотов, выходим|r")
+        end
         return
     end
 
@@ -540,6 +585,216 @@ function AEB:EquipBestBags()
     isEquippingBag = false
 end
 
+-- Функция для получения правильного окончания слова "слот"
+local function GetSlotWord(count)
+    local lastDigit = count % 10
+    local lastTwoDigits = count % 100
+
+    if lastTwoDigits >= 11 and lastTwoDigits <= 14 then
+        return "слотов"
+    elseif lastDigit == 1 then
+        return "слот"
+    elseif lastDigit >= 2 and lastDigit <= 4 then
+        return "слота"
+    else
+        return "слотов"
+    end
+end
+
+-- Функция для получения количества слотов в сумке по её ссылке
+function AEB:GetBagSlotCount(itemLink)
+    if not itemLink then return 0 end
+
+    scanner:ClearLines()
+    scanner:SetHyperlink(itemLink)
+
+    for i = 1, scanner:NumLines() do
+        local text = _G["AEBScannerTextLeft"..i]:GetText()
+        if text then
+            if AEB_DEBUG_MODE == 1 then
+                print("|cff00ffffDEBUG: GetBagSlotCount - строка " .. i .. ": " .. text .. "|r")
+            end
+            -- Паттерны для разных локализаций: "6-слотовый", "6 Slot", "6-Slot", "(6 ячеек)"
+            local slots = text:match("(%d+)%-слотовый") or text:match("(%d+)%-Slot") or text:match("(%d+) Slot") or text:match("%((%d+) ячеек%)")
+            if slots then
+                if AEB_DEBUG_MODE == 1 then
+                    print("|cff00ff00DEBUG: GetBagSlotCount - найдено слотов: " .. slots .. "|r")
+                end
+                return tonumber(slots) or 0
+            end
+        end
+    end
+
+    if AEB_DEBUG_MODE == 1 then
+        print("|cffff0000DEBUG: GetBagSlotCount - не удалось найти количество слотов|r")
+    end
+
+    return 0
+end
+
+-- Функция проверки содержимого сумки и доступного места
+-- Возвращает: isEmpty, usedSlots, totalFreeSlots
+function AEB:CheckBagContents(bagSlot)
+    -- Определяем containerID по слоту экипировки (20->1, 21->2, 22->3, 23->4)
+    local containerID = bagSlot - 19
+
+    local usedSlots = 0
+    local numSlots = GetContainerNumSlots(containerID)
+
+    -- Подсчитываем занятые слоты в этой сумке
+    for slot = 1, numSlots do
+        local itemLink = GetContainerItemLink(containerID, slot)
+        if itemLink then
+            usedSlots = usedSlots + 1
+        end
+    end
+
+    -- Подсчитываем все свободные слоты во ВСЕХ остальных сумках (включая bag 0)
+    local totalFreeSlots = 0
+    for bag = 0, 4 do
+        -- Пропускаем проверяемую сумку
+        if bag ~= containerID then
+            local bagSlots = GetContainerNumSlots(bag)
+            for slot = 1, bagSlots do
+                local itemLink = GetContainerItemLink(bag, slot)
+                if not itemLink then
+                    totalFreeSlots = totalFreeSlots + 1
+                end
+            end
+        end
+    end
+
+    local isEmpty = (usedSlots == 0)
+    return isEmpty, usedSlots, totalFreeSlots
+end
+
+-- Функция перемещения всех предметов из сумки в свободные слоты
+-- Возвращает: success (true если все предметы перемещены)
+function AEB:MoveBagContents(bagSlot)
+    local containerID = bagSlot - 19
+    local numSlots = GetContainerNumSlots(containerID)
+
+    -- Собираем все предметы из сумки
+    local items = {}
+    for slot = 1, numSlots do
+        local itemLink = GetContainerItemLink(containerID, slot)
+        if itemLink then
+            table.insert(items, {bag = containerID, slot = slot})
+        end
+    end
+
+    -- Перемещаем каждый предмет в первый свободный слот других сумок
+    for _, item in ipairs(items) do
+        local moved = false
+        for bag = 0, 4 do
+            if bag ~= containerID then
+                local bagSlots = GetContainerNumSlots(bag)
+                for slot = 1, bagSlots do
+                    local existingItem = GetContainerItemLink(bag, slot)
+                    if not existingItem then
+                        -- Нашли свободный слот, перемещаем предмет
+                        PickupContainerItem(item.bag, item.slot)
+                        if CursorHasItem() then
+                            PickupContainerItem(bag, slot)
+                            moved = true
+                            break
+                        end
+                    end
+                end
+                if moved then break end
+            end
+        end
+
+        -- Если не удалось переместить хотя бы один предмет - возвращаем false
+        if not moved then
+            ClearCursor()
+            return false
+        end
+    end
+
+    return true
+end
+
+-- Функция сравнения новой сумки с надетыми
+-- Возвращает: shouldReplace, targetBagSlot, targetBagLink, targetBagSlots, newBagSlots
+function AEB:CompareBagWithEquipped(newBagLink)
+    if not newBagLink then return false end
+
+    -- Проверяем, что это действительно сумка
+    local _, _, _, _, _, itemType = GetItemInfo(newBagLink)
+    if itemType ~= "Контейнер" and itemType ~= "Container" and itemType ~= "Сумки" and itemType ~= "Сумка" then
+        return false
+    end
+
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: CompareBagWithEquipped - проверяем сумку: " .. (newBagLink or "nil") .. ", тип: " .. (itemType or "nil") .. "|r")
+    end
+
+    -- Получаем количество слотов в новой сумке
+    local newBagSlots = self:GetBagSlotCount(newBagLink)
+    if newBagSlots == 0 then
+        if AEB_DEBUG_MODE == 1 then
+            print("|cff00ffffDEBUG: CompareBagWithEquipped - не удалось определить количество слотов|r")
+        end
+        return false
+    end
+
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: CompareBagWithEquipped - новая сумка имеет " .. newBagSlots .. " слотов|r")
+    end
+
+    -- Проверяем, все ли 4 слота заняты
+    local equippedBags = {}
+    for _, bagSlot in ipairs(BAG_SLOTS) do
+        local equippedLink = GetInventoryItemLink("player", bagSlot)
+        if equippedLink then
+            local slots = self:GetBagSlotCount(equippedLink)
+            table.insert(equippedBags, {
+                slot = bagSlot,
+                link = equippedLink,
+                slots = slots
+            })
+            if AEB_DEBUG_MODE == 1 then
+                print("|cff00ffffDEBUG: CompareBagWithEquipped - слот " .. bagSlot .. " занят сумкой на " .. slots .. " слотов|r")
+            end
+        end
+    end
+
+    -- Если не все слоты заняты, замена не нужна
+    if #equippedBags < 4 then
+        if AEB_DEBUG_MODE == 1 then
+            print("|cff00ffffDEBUG: CompareBagWithEquipped - не все слоты заняты (" .. #equippedBags .. "/4), замена не нужна|r")
+        end
+        return false
+    end
+
+    -- Ищем сумку с наименьшим количеством слотов
+    local minBag = equippedBags[1]
+    for _, bag in ipairs(equippedBags) do
+        if bag.slots < minBag.slots then
+            minBag = bag
+        end
+    end
+
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: CompareBagWithEquipped - самая маленькая сумка: слот " .. minBag.slot .. ", " .. minBag.slots .. " слотов|r")
+    end
+
+    -- Если новая сумка вместительнее самой маленькой надетой
+    if newBagSlots > minBag.slots then
+        if AEB_DEBUG_MODE == 1 then
+            print("|cff00ff00DEBUG: CompareBagWithEquipped - НАЙДЕНА ЗАМЕНА! " .. newBagSlots .. " > " .. minBag.slots .. "|r")
+        end
+        return true, minBag.slot, minBag.link, minBag.slots, newBagSlots
+    end
+
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: CompareBagWithEquipped - новая сумка не лучше (" .. newBagSlots .. " <= " .. minBag.slots .. ")|r")
+    end
+
+    return false
+end
+
 function AEB:OnInitialize()
     -- Инициализация SavedVariables
     if not AutoEquipBetterDB then
@@ -556,6 +811,14 @@ function AEB:OnInitialize()
     end
 
     self.db = AutoEquipBetterDB[charKey]
+
+    -- Миграция настроек: добавляем новые опции, если их нет
+    if self.db.smartBagReplace == nil then
+        self.db.smartBagReplace = true
+    end
+    if self.db.autoEquipAmmo == nil then
+        self.db.autoEquipAmmo = true
+    end
 
     self:RegisterEvent("BAG_UPDATE")
     self:RegisterEvent("MERCHANT_SHOW")
@@ -756,6 +1019,23 @@ function AEB:BAG_UPDATE()
     if self.db.autoSuggest then
         bagUpdateTimer = 0
         bagUpdatePending = true
+    end
+
+    -- Обновление информации о сумке в окне сравнения (если оно открыто)
+    if mainFrame and mainFrame:IsVisible() and mainFrame.currentItem then
+        local q = mainFrame.currentItem
+        if q.isBagReplacement and q.targetBagSlot then
+            local isEmpty, usedSlots, totalFreeSlots = self:CheckBagContents(q.targetBagSlot)
+
+            if isEmpty then
+                mainFrame.bagInfo:SetText("|cff00ff00Сумка пуста, можно безопасно заменить|r")
+            elseif totalFreeSlots >= usedSlots then
+                mainFrame.bagInfo:SetText("|cff00ff00Содержимое будет перемещено в свободные слоты других сумок|r")
+            else
+                local needed = usedSlots - totalFreeSlots
+                mainFrame.bagInfo:SetText("|cffff0000Нужно освободить " .. needed .. " слот(ов), чтобы надеть эту сумку|r")
+            end
+        end
     end
 
     -- Автоэкипировка боеприпасов
@@ -1108,7 +1388,7 @@ function AEB:FindBagUpgrades()
             local link = GetContainerItemLink(bag, slot)
             if link and IsEquippableItem(link) then
                 local id = link:match("item:(%d+)")
-                if id and not self.db.blacklist[id] and not sessionIgnoreList[id] then
+                if id and not self.db.blacklist[id] and not sessionIgnoreList[id] and not recentlyEquipped[id] then
                     local _, _, _, _, minLvl, itemType, subType, _, loc = GetItemInfo(link)
                     if loc and equipSlotMap[loc] then
                         if (not minLvl or minLvl <= UnitLevel("player")) and self:CanPlayerWear(itemType, subType) then
@@ -1129,6 +1409,41 @@ function AEB:FindBagUpgrades()
         end
     end
 
+    -- Проверка умной замены сумок (если включена настройка)
+    if self.db.smartBagReplace then
+        for bag = 0, 4 do
+            for slot = 1, GetContainerNumSlots(bag) do
+                local link = GetContainerItemLink(bag, slot)
+                if link then
+                    local id = link:match("item:(%d+)")
+                    if id and not self.db.blacklist[id] and not sessionIgnoreList[id] and not recentlyEquipped[id] then
+                        local shouldReplace, targetBagSlot, targetBagLink, targetBagSlots, newBagSlots = self:CompareBagWithEquipped(link)
+
+                        if shouldReplace then
+                            -- Добавляем замену сумки как апгрейд
+                            table.insert(upgrades, {
+                                link = link,
+                                id = id,
+                                score = newBagSlots, -- Используем количество слотов как "score"
+                                bag = bag,
+                                slot = slot,
+                                loc = "INVTYPE_BAG",
+                                newS = newBagSlots,
+                                oldS = targetBagSlots,
+                                oldL = targetBagLink,
+                                oldNameOvr = nil,
+                                compLink = nil,
+                                oldIsPair = false,
+                                isBagReplacement = true,
+                                targetBagSlot = targetBagSlot
+                            })
+                        end
+                    end
+                end
+            end
+        end
+    end
+
     return upgrades
 end
 
@@ -1137,7 +1452,15 @@ function AEB:CheckAndSuggestUpgrades()
     if InCombatLockdown() then return end
     if not self.db.autoSuggest and not self.db.autoEquip then return end
 
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: CheckAndSuggestUpgrades - начинаем проверку|r")
+    end
+
     local upgrades = self:FindBagUpgrades()
+
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: CheckAndSuggestUpgrades - найдено апгрейдов: " .. #upgrades .. "|r")
+    end
 
     -- Сортировка по приросту
     table.sort(upgrades, function(a, b)
@@ -1161,7 +1484,14 @@ function AEB:CheckAndSuggestUpgrades()
             end
             table.insert(itemQueue, data)
             self.queueTotal = self.queueTotal + 1
+            if AEB_DEBUG_MODE == 1 then
+                print("|cff00ff00DEBUG: CheckAndSuggestUpgrades - добавлен в очередь: " .. (data.link or "nil") .. ", isBagReplacement=" .. tostring(data.isBagReplacement) .. "|r")
+            end
         end
+    end
+
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: CheckAndSuggestUpgrades - размер очереди после добавления: " .. #itemQueue .. "|r")
     end
 
     -- Показ окна или автонадевание
@@ -1362,12 +1692,21 @@ end
 -- === УПРАВЛЕНИЕ ОЧЕРЕДЬЮ UI ===
 function AEB:ShowNextInQueue()
     if mainFrame and mainFrame:IsVisible() then return end
-    
+
     while #itemQueue > 0 do
         local data = itemQueue[1]
+
+        -- Специальная обработка для замены сумок
+        if data.isBagReplacement then
+            -- Для сумок не нужно пересчитывать GetUpgradeInfo, данные уже есть
+            self:CreateUI(data)
+            return
+        end
+
+        -- Обычная обработка для экипировки
         local score = self:GetScoreForLink(data.link)
         local isUp, newS, oldS, oldL, oldNameOvr, compLink, oldIsPair = self:GetUpgradeInfo(data.link, data.loc, score)
-        
+
         if isUp then
             data.newS, data.oldS, data.oldL = newS, oldS, oldL
             data.oldNameOvr, data.compLink, data.oldIsPair = oldNameOvr, compLink, oldIsPair
@@ -1392,6 +1731,14 @@ function AEB:UpdateComparisonStats()
     if not mainFrame or not mainFrame.currentItem then return end
 
     local q = mainFrame.currentItem
+
+    -- Специальная обработка для сумок
+    if q.isBagReplacement then
+        local slotDiff = q.newS - q.oldS
+        mainFrame.stats:SetText("|cff00ff00+" .. slotDiff .. "|r " .. GetSlotWord(slotDiff) .. " инвентаря")
+        return
+    end
+
     local newStats = self:ScanItem(q.link)
     if q.compLink then AddStats(newStats, self:ScanItem(q.compLink)) end
 
@@ -1505,12 +1852,16 @@ function AEB:CreateUI(q)
         mainFrame.iconBorder:SetSize(70, 70)
         mainFrame.iconBorder:SetPoint("CENTER", mainFrame.icon, "CENTER", 0, 0)
 
-        -- Золотистая подсветка для нового предмета
-        mainFrame.iconHighlight = mainFrame:CreateTexture(nil, "OVERLAY")
+        -- Фрейм для золотистой подсветки нового предмета
+        mainFrame.iconHighlightFrame = CreateFrame("Frame", nil, mainFrame)
+        mainFrame.iconHighlightFrame:SetSize(70, 70)
+        mainFrame.iconHighlightFrame:SetPoint("CENTER", mainFrame.icon, "CENTER", 0, 0)
+        mainFrame.iconHighlightFrame:SetFrameLevel(mainFrame:GetFrameLevel() + 10)
+
+        mainFrame.iconHighlight = mainFrame.iconHighlightFrame:CreateTexture(nil, "OVERLAY")
         mainFrame.iconHighlight:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
         mainFrame.iconHighlight:SetBlendMode("ADD")
-        mainFrame.iconHighlight:SetSize(70, 70)
-        mainFrame.iconHighlight:SetPoint("CENTER", mainFrame.icon, "CENTER", 0, 0)
+        mainFrame.iconHighlight:SetAllPoints(mainFrame.iconHighlightFrame)
         mainFrame.iconHighlight:SetVertexColor(1, 0.82, 0, 1)
 
         -- Кликабельная кнопка для нового предмета
@@ -1519,11 +1870,14 @@ function AEB:CreateUI(q)
         mainFrame.iconButton:SetPoint("CENTER", mainFrame.icon, "CENTER")
         mainFrame.iconButton:SetScript("OnClick", function()
             if mainFrame.selectedItem ~= "new" then
+                if AEB_DEBUG_MODE == 1 then
+                    print("|cff00ffffDEBUG: Клик на новый предмет|r")
+                end
                 mainFrame.selectedItem = "new"
-                mainFrame.iconHighlight:Show()
-                mainFrame.oldIconHighlight:Hide()
-                mainFrame.titleBG:SetBackdropBorderColor(1, 0.82, 0) -- Золотистая рамка
-                mainFrame.oldTitleBG:SetBackdropBorderColor(0.5, 0.5, 0.5) -- Серая рамка
+                mainFrame.iconHighlightFrame:Show()
+                mainFrame.oldIconHighlightFrame:Hide()
+                mainFrame.titleHighlightFrame:Show()
+                mainFrame.oldTitleHighlightFrame:Hide()
                 mainFrame.cb:SetChecked(false)
                 AEB:UpdateComparisonStats()
             end
@@ -1548,14 +1902,26 @@ function AEB:CreateUI(q)
         mainFrame.titleBG:SetPoint("RIGHT", mainFrame.title, "RIGHT", 5, 0)
         mainFrame.title:SetParent(mainFrame.titleBG)
 
+        -- Фрейм для золотистой подсветки названия нового предмета
+        mainFrame.titleHighlightFrame = CreateFrame("Frame", nil, mainFrame)
+        mainFrame.titleHighlightFrame:SetHeight(44)
+        mainFrame.titleHighlightFrame:SetPoint("LEFT", mainFrame.title, "LEFT", -3, 0)
+        mainFrame.titleHighlightFrame:SetPoint("RIGHT", mainFrame.title, "RIGHT", 5, 0)
+        mainFrame.titleHighlightFrame:SetFrameLevel(mainFrame.titleBG:GetFrameLevel() + 1)
+        mainFrame.titleHighlightFrame:SetBackdrop({
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            edgeSize = 16,
+        })
+        mainFrame.titleHighlightFrame:SetBackdropBorderColor(1, 0.82, 0, 1)
+
         -- Кликабельность для названия нового предмета
         mainFrame.titleBG:SetScript("OnClick", function()
             if mainFrame.selectedItem ~= "new" then
                 mainFrame.selectedItem = "new"
-                mainFrame.iconHighlight:Show()
-                mainFrame.oldIconHighlight:Hide()
-                mainFrame.titleBG:SetBackdropBorderColor(1, 0.82, 0) -- Золотистая рамка
-                mainFrame.oldTitleBG:SetBackdropBorderColor(0.5, 0.5, 0.5) -- Серая рамка
+                mainFrame.iconHighlightFrame:Show()
+                mainFrame.oldIconHighlightFrame:Hide()
+                mainFrame.titleHighlightFrame:Show()
+                mainFrame.oldTitleHighlightFrame:Hide()
                 mainFrame.cb:SetChecked(false)
                 AEB:UpdateComparisonStats()
             end
@@ -1574,14 +1940,18 @@ function AEB:CreateUI(q)
         mainFrame.oldIconBorder:SetSize(70, 70)
         mainFrame.oldIconBorder:SetPoint("CENTER", mainFrame.oldIcon, "CENTER", 0, 0)
 
-        -- Золотистая подсветка для старого предмета
-        mainFrame.oldIconHighlight = mainFrame:CreateTexture(nil, "OVERLAY")
+        -- Фрейм для золотистой подсветки старого предмета
+        mainFrame.oldIconHighlightFrame = CreateFrame("Frame", nil, mainFrame)
+        mainFrame.oldIconHighlightFrame:SetSize(70, 70)
+        mainFrame.oldIconHighlightFrame:SetPoint("CENTER", mainFrame.oldIcon, "CENTER", 0, 0)
+        mainFrame.oldIconHighlightFrame:SetFrameLevel(mainFrame:GetFrameLevel() + 10)
+
+        mainFrame.oldIconHighlight = mainFrame.oldIconHighlightFrame:CreateTexture(nil, "OVERLAY")
         mainFrame.oldIconHighlight:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
         mainFrame.oldIconHighlight:SetBlendMode("ADD")
-        mainFrame.oldIconHighlight:SetSize(70, 70)
-        mainFrame.oldIconHighlight:SetPoint("CENTER", mainFrame.oldIcon, "CENTER", 0, 0)
+        mainFrame.oldIconHighlight:SetAllPoints(mainFrame.oldIconHighlightFrame)
         mainFrame.oldIconHighlight:SetVertexColor(1, 0.82, 0, 1)
-        mainFrame.oldIconHighlight:Hide() -- По умолчанию скрыта
+        mainFrame.oldIconHighlightFrame:Hide() -- По умолчанию скрыта
 
         -- Кликабельная кнопка для старого предмета
         mainFrame.oldIconButton = CreateFrame("Button", nil, mainFrame)
@@ -1590,10 +1960,10 @@ function AEB:CreateUI(q)
         mainFrame.oldIconButton:SetScript("OnClick", function()
             if mainFrame.selectedItem ~= "old" then
                 mainFrame.selectedItem = "old"
-                mainFrame.oldIconHighlight:Show()
-                mainFrame.iconHighlight:Hide()
-                mainFrame.oldTitleBG:SetBackdropBorderColor(1, 0.82, 0) -- Золотистая рамка
-                mainFrame.titleBG:SetBackdropBorderColor(0.5, 0.5, 0.5) -- Серая рамка
+                mainFrame.oldIconHighlightFrame:Show()
+                mainFrame.iconHighlightFrame:Hide()
+                mainFrame.oldTitleHighlightFrame:Show()
+                mainFrame.titleHighlightFrame:Hide()
                 mainFrame.cb:SetChecked(false)
                 AEB:UpdateComparisonStats()
             end
@@ -1618,18 +1988,38 @@ function AEB:CreateUI(q)
         mainFrame.oldTitleBG:SetPoint("RIGHT", mainFrame.oldTitle, "RIGHT", 5, 0)
         mainFrame.oldTitle:SetParent(mainFrame.oldTitleBG)
 
+        -- Фрейм для золотистой подсветки названия старого предмета
+        mainFrame.oldTitleHighlightFrame = CreateFrame("Frame", nil, mainFrame)
+        mainFrame.oldTitleHighlightFrame:SetHeight(44)
+        mainFrame.oldTitleHighlightFrame:SetPoint("LEFT", mainFrame.oldTitle, "LEFT", -3, 0)
+        mainFrame.oldTitleHighlightFrame:SetPoint("RIGHT", mainFrame.oldTitle, "RIGHT", 5, 0)
+        mainFrame.oldTitleHighlightFrame:SetFrameLevel(mainFrame.oldTitleBG:GetFrameLevel() + 1)
+        mainFrame.oldTitleHighlightFrame:SetBackdrop({
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            edgeSize = 16,
+        })
+        mainFrame.oldTitleHighlightFrame:SetBackdropBorderColor(1, 0.82, 0, 1)
+        mainFrame.oldTitleHighlightFrame:Hide() -- По умолчанию скрыта
+
         -- Кликабельность для названия старого предмета
         mainFrame.oldTitleBG:SetScript("OnClick", function()
             if mainFrame.selectedItem ~= "old" then
                 mainFrame.selectedItem = "old"
-                mainFrame.oldIconHighlight:Show()
-                mainFrame.iconHighlight:Hide()
-                mainFrame.oldTitleBG:SetBackdropBorderColor(1, 0.82, 0) -- Золотистая рамка
-                mainFrame.titleBG:SetBackdropBorderColor(0.5, 0.5, 0.5) -- Серая рамка
+                mainFrame.oldIconHighlightFrame:Show()
+                mainFrame.iconHighlightFrame:Hide()
+                mainFrame.oldTitleHighlightFrame:Show()
+                mainFrame.titleHighlightFrame:Hide()
                 mainFrame.cb:SetChecked(false)
                 AEB:UpdateComparisonStats()
             end
         end)
+
+        -- Текст с информацией о содержимом сумки (создаём, но по умолчанию скрываем)
+        mainFrame.bagInfo = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        mainFrame.bagInfo:SetPoint("TOPLEFT", mainFrame.oldIcon, "BOTTOMLEFT", 0, -5)
+        mainFrame.bagInfo:SetWidth(220)
+        mainFrame.bagInfo:SetJustifyH("LEFT")
+        mainFrame.bagInfo:Hide()
 
         mainFrame.statsHeader = mainFrame:CreateFontString(nil, "OVERLAY", fontTitle)
         mainFrame.statsHeader:SetPoint("TOPLEFT", 240, -20)
@@ -1650,10 +2040,18 @@ function AEB:CreateUI(q)
             if self:GetChecked() then
                 -- При активации чекбокса переключаем выбор на старый предмет
                 mainFrame.selectedItem = "old"
-                mainFrame.oldIconHighlight:Show()
-                mainFrame.iconHighlight:Hide()
-                mainFrame.oldTitleBG:SetBackdropBorderColor(1, 0.82, 0) -- Золотистая рамка
-                mainFrame.titleBG:SetBackdropBorderColor(0.5, 0.5, 0.5) -- Серая рамка
+                mainFrame.oldIconHighlightFrame:Show()
+                mainFrame.iconHighlightFrame:Hide()
+                mainFrame.oldTitleHighlightFrame:Show()
+                mainFrame.titleHighlightFrame:Hide()
+                AEB:UpdateComparisonStats()
+            else
+                -- При снятии чекбокса переключаем выбор обратно на новый предмет
+                mainFrame.selectedItem = "new"
+                mainFrame.iconHighlightFrame:Show()
+                mainFrame.oldIconHighlightFrame:Hide()
+                mainFrame.titleHighlightFrame:Show()
+                mainFrame.oldTitleHighlightFrame:Hide()
                 AEB:UpdateComparisonStats()
             end
         end)
@@ -1690,10 +2088,10 @@ function AEB:CreateUI(q)
     mainFrame.title:SetTextColor(1, 1, 1)
 
     -- Устанавливаем золотистую подсветку на новый предмет
-    mainFrame.iconHighlight:Show()
-    mainFrame.oldIconHighlight:Hide()
-    mainFrame.titleBG:SetBackdropBorderColor(1, 0.82, 0) -- Золотистая рамка
-    mainFrame.oldTitleBG:SetBackdropBorderColor(0.5, 0.5, 0.5) -- Серая рамка 
+    mainFrame.iconHighlightFrame:Show()
+    mainFrame.oldIconHighlightFrame:Hide()
+    mainFrame.titleHighlightFrame:Show()
+    mainFrame.oldTitleHighlightFrame:Hide() 
     
     mainFrame.cb.text:SetText("Добавить в чёрный список")
     
@@ -1707,9 +2105,35 @@ function AEB:CreateUI(q)
         mainFrame.oldTitle:SetText(oldName)
         mainFrame.oldTitle:SetTextColor(1, 1, 1)
     else
-        mainFrame.oldIcon:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
+        -- Используем текстуру пустого слота соответствующего типа
+        local emptyTexture = emptySlotTextures[q.loc] or "Interface\\Icons\\INV_Misc_QuestionMark"
+        mainFrame.oldIcon:SetTexture(emptyTexture)
         mainFrame.oldTitle:SetText("Ничего не надето")
         mainFrame.oldTitle:SetTextColor(0.5, 0.5, 0.5)
+    end
+
+    -- Проверяем, является ли это заменой сумки
+    if q.isBagReplacement and q.targetBagSlot then
+        local isEmpty, usedSlots, totalFreeSlots = self:CheckBagContents(q.targetBagSlot)
+
+        if isEmpty then
+            -- Если сумка пуста, не показываем сообщение
+            mainFrame.bagInfo:Hide()
+        elseif totalFreeSlots >= usedSlots then
+            mainFrame.bagInfo:SetText("|cff00ff00Содержимое будет перемещено в свободные слоты других сумок|r")
+            mainFrame.bagInfo:Show()
+        else
+            local needed = usedSlots - totalFreeSlots
+            mainFrame.bagInfo:SetText("|cffff0000Нужно освободить " .. needed .. " слот(ов), чтобы надеть эту сумку|r")
+            mainFrame.bagInfo:Show()
+        end
+
+        -- Обновляем заголовок для сумок
+        mainFrame.statsHeader:SetText("При замене произойдут следующие изменения:")
+    else
+        mainFrame.bagInfo:Hide()
+        -- Восстанавливаем обычный заголовок для экипировки
+        mainFrame.statsHeader:SetText("При замене произойдут следующие изменения характеристик:")
     end
 
     if (self.queueTotal or 0) > 1 then
@@ -1727,22 +2151,86 @@ function AEB:CreateUI(q)
 
         -- Если выбран новый предмет - экипируем его
         if mainFrame.selectedItem == "new" then
-            -- Проверка на бой (кроме оружия)
-            if UnitAffectingCombat("player") then
-                local isWeaponSlot = (q.loc == "INVTYPE_WEAPON" or q.loc == "INVTYPE_2HWEAPON" or
-                                      q.loc == "INVTYPE_WEAPONMAINHAND" or q.loc == "INVTYPE_WEAPONOFFHAND" or
-                                      q.loc == "INVTYPE_SHIELD" or q.loc == "INVTYPE_HOLDABLE" or
-                                      q.loc == "INVTYPE_RANGED" or q.loc == "INVTYPE_THROWN" or q.loc == "INVTYPE_RANGEDRIGHT")
-                if not isWeaponSlot then
-                    print("|cffff0000Невозможно сменить экипировку в бою (кроме оружия)|r")
+            -- Специальная обработка для замены сумок
+            if q.isBagReplacement and q.targetBagSlot then
+                local isEmpty, usedSlots, totalFreeSlots = AEB:CheckBagContents(q.targetBagSlot)
+
+                if AEB_DEBUG_MODE == 1 then
+                    print("|cff00ffffDEBUG: Замена сумки - isEmpty=" .. tostring(isEmpty) .. ", usedSlots=" .. usedSlots .. ", totalFreeSlots=" .. totalFreeSlots .. "|r")
+                end
+
+                if isEmpty then
+                    -- Сумка пуста, просто экипируем новую
+                    if AEB_DEBUG_MODE == 1 then
+                        print("|cff00ffffDEBUG: Экипируем сумку из bag=" .. q.bag .. ", slot=" .. q.slot .. " в слот " .. q.targetBagSlot .. "|r")
+                    end
+                    ClearCursor()
+                    PickupContainerItem(q.bag, q.slot)
+                    if CursorHasItem() then
+                        EquipCursorItem(q.targetBagSlot)
+                        -- Добавляем в список недавно экипированных для предотвращения повторных предложений
+                        if id then
+                            recentlyEquipped[id] = true
+                        end
+                    end
+                elseif totalFreeSlots >= usedSlots then
+                    -- Достаточно места, перемещаем содержимое и экипируем
+                    if AEB:MoveBagContents(q.targetBagSlot) then
+                        if AEB_DEBUG_MODE == 1 then
+                            print("|cff00ffffDEBUG: Содержимое перемещено, экипируем сумку|r")
+                        end
+                        ClearCursor()
+                        PickupContainerItem(q.bag, q.slot)
+                        if CursorHasItem() then
+                            EquipCursorItem(q.targetBagSlot)
+                            -- Добавляем в список недавно экипированных для предотвращения повторных предложений
+                            if id then
+                                recentlyEquipped[id] = true
+                            end
+                        end
+                    else
+                        print("|cffff0000Не удалось переместить содержимое сумки|r")
+                        return
+                    end
+                else
+                    -- Недостаточно места, не закрываем окно
+                    local needed = usedSlots - totalFreeSlots
+                    print("|cffff0000Освободите " .. needed .. " слот(ов) в других сумках|r")
+                    return
+                end
+            else
+                -- Обычная экипировка (не сумка)
+                -- Проверка на бой (кроме оружия)
+                if UnitAffectingCombat("player") then
+                    local isWeaponSlot = (q.loc == "INVTYPE_WEAPON" or q.loc == "INVTYPE_2HWEAPON" or
+                                          q.loc == "INVTYPE_WEAPONMAINHAND" or q.loc == "INVTYPE_WEAPONOFFHAND" or
+                                          q.loc == "INVTYPE_SHIELD" or q.loc == "INVTYPE_HOLDABLE" or
+                                          q.loc == "INVTYPE_RANGED" or q.loc == "INVTYPE_THROWN" or q.loc == "INVTYPE_RANGEDRIGHT")
+                    if not isWeaponSlot then
+                        print("|cffff0000Невозможно сменить экипировку в бою (кроме оружия)|r")
+                        return
+                    end
+                end
+
+                EquipItemByName(q.link)
+                if q.compLink then EquipItemByName(q.compLink) end
+
+                -- Добавляем в список недавно экипированных для предотвращения повторных предложений
+                if id then
+                    recentlyEquipped[id] = true
+                end
+            end
+        else
+            -- Если выбран старый предмет - добавляем новый в временный игнор-лист
+            -- Но только если это НЕ замена сумки с недостаточным местом
+            if q.isBagReplacement and q.targetBagSlot then
+                local isEmpty, usedSlots, totalFreeSlots = AEB:CheckBagContents(q.targetBagSlot)
+                if not isEmpty and totalFreeSlots < usedSlots then
+                    -- Не добавляем в игнор-лист, если недостаточно места
                     return
                 end
             end
 
-            EquipItemByName(q.link)
-            if q.compLink then EquipItemByName(q.compLink) end
-        else
-            -- Если выбран старый предмет - добавляем новый в временный игнор-лист
             if id then
                 sessionIgnoreList[id] = true
             end
@@ -2367,9 +2855,21 @@ function AEB:ShowSettingsFrame()
     cbAutoEquipBags:SetChecked(self.db.autoEquipBags)
     cbAutoEquipBags.text = cbAutoEquipBags:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     cbAutoEquipBags.text:SetPoint("LEFT", cbAutoEquipBags, "RIGHT", 5, 0)
-    cbAutoEquipBags.text:SetText("Автоматически экипировать сумки в пустые слоты")
+    cbAutoEquipBags.text:SetText("Авто-экипировка сумок в пустые слоты")
     cbAutoEquipBags:SetScript("OnClick", function(self)
         AEB.db.autoEquipBags = self:GetChecked()
+    end)
+
+    -- Чекбокс "Умная замена сумок"
+    local cbSmartBagReplace = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
+    cbSmartBagReplace:SetSize(20, 20)
+    cbSmartBagReplace:SetPoint("TOPLEFT", cbAutoEquipBags, "BOTTOMLEFT", 0, -5)
+    cbSmartBagReplace:SetChecked(self.db.smartBagReplace)
+    cbSmartBagReplace.text = cbSmartBagReplace:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    cbSmartBagReplace.text:SetPoint("LEFT", cbSmartBagReplace, "RIGHT", 5, 0)
+    cbSmartBagReplace.text:SetText("Умная замена сумок на более вместительные")
+    cbSmartBagReplace:SetScript("OnClick", function(self)
+        AEB.db.smartBagReplace = self:GetChecked()
     end)
 
     -- === ВКЛАДКА "ИСКЛЮЧЕНИЯ" ===
