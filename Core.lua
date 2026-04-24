@@ -1,4 +1,4 @@
--- Аддон AutoEquipBetter v0.11.12a для World of Warcraft 3.3.5a
+-- Аддон AutoEquipBetter v0.11.13a для World of Warcraft 3.3.5a
 --== Важная информация: ==--
 -- Для определения возможности надеть предмет на персонажа нельзя использовать функцию IsUsableItem и поиск красного цвета в тексте подсказки, потому что это не даёт нужного результата. Для точного определения типа и подтипа оружия и брони нужно использовать GetItemInfo(id), а для определения возможности надевания - чтение оружейных и доспеховых навыков персонажа.
 -- Координаты стрелок относительно иконок и другие подобные визуальные элементы менять не нужно без явного указания. Я настроил их вручную.
@@ -828,6 +828,9 @@ function AEB:OnInitialize()
     self:RegisterEvent("LOOT_CLOSED")
     self:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 	self:RegisterEvent("TRADE_SKILL_SHOW")
+	self:RegisterEvent("TRAINER_SHOW")
+	self:RegisterEvent("TRAINER_UPDATE")
+	self:RegisterEvent("TRAINER_CLOSED")
     self:RegisterEvent("QUEST_DETAIL")
     self:RegisterEvent("QUEST_COMPLETE")
     self:RegisterEvent("QUEST_FINISHED")
@@ -2397,6 +2400,115 @@ function AEB:UpdateTradeSkillArrow(id)
                 self.tsArrow:Show()
                 if AEB_DEBUG_MODE == 1 then
                     print("|cff00ffffDEBUG: UpdateTradeSkillArrow - маркер показан|r")
+                end
+            end
+        end
+    end
+end
+
+-- === ИНТЕГРАЦИЯ В ОКНО УЧИТЕЛЯ ПРОФЕССИЙ (TRAINER) ===
+function AEB:TRAINER_SHOW()
+    if not IsAddOnLoaded("Blizzard_TrainerUI") then return end
+    self:UpdateTrainerArrows()
+end
+
+function AEB:TRAINER_UPDATE()
+    self:UpdateTrainerArrows()
+end
+
+function AEB:TRAINER_CLOSED()
+    -- Скрываем все маркеры учителя
+    if self.trainerArrows then
+        for _, arrow in pairs(self.trainerArrows) do
+            arrow:Hide()
+        end
+    end
+end
+
+function AEB:UpdateTrainerArrows()
+    if not ClassTrainerFrame or not ClassTrainerFrame:IsVisible() then
+        if AEB_DEBUG_MODE == 1 then
+            print("|cff00ffffDEBUG: UpdateTrainerArrows - ClassTrainerFrame не найден или не виден|r")
+        end
+        return
+    end
+
+    if AEB_DEBUG_MODE == 1 then
+        print("|cff00ffffDEBUG: UpdateTrainerArrows - начинаем обновление|r")
+    end
+
+    -- Создаём пул маркеров для учителя (если ещё не создан)
+    if not self.trainerArrows then
+        self.trainerArrows = {}
+    end
+
+    -- Скрываем все маркеры перед обновлением
+    for _, arrow in pairs(self.trainerArrows) do
+        arrow:Hide()
+    end
+
+    -- Получаем смещение прокрутки
+    local offset = FauxScrollFrame_GetOffset(ClassTrainerListScrollFrame) or 0
+
+    -- Проходим по всем видимым кнопкам навыков (обычно 1-11)
+    for i = 1, 11 do
+        local button = _G["ClassTrainerSkill"..i]
+        if button and button:IsVisible() then
+            -- Вычисляем абсолютный индекс навыка с учётом прокрутки
+            local skillIndex = i + offset
+
+            if AEB_DEBUG_MODE == 1 then
+                print("|cff00ffffDEBUG: UpdateTrainerArrows - кнопка " .. i .. ", skillIndex=" .. tostring(skillIndex) .. "|r")
+            end
+
+            local serviceName, serviceSubText, serviceType, isExpanded = GetTrainerServiceInfo(skillIndex)
+
+            if AEB_DEBUG_MODE == 1 then
+                print("|cff00ffffDEBUG: UpdateTrainerArrows - serviceName=" .. tostring(serviceName) .. ", serviceType=" .. tostring(serviceType) .. "|r")
+            end
+
+            -- Проверяем, является ли это рецептом (не заголовком категории)
+            if serviceType and serviceType ~= "header" then
+                -- Получаем ссылку на предмет, который создаёт этот рецепт
+                local link = GetTrainerServiceItemLink(skillIndex)
+
+                if AEB_DEBUG_MODE == 1 then
+                    print("|cff00ffffDEBUG: UpdateTrainerArrows - link=" .. tostring(link) .. "|r")
+                end
+
+                if link and IsEquippableItem(link) then
+                    local _, _, _, _, _, itemType, subType, _, loc = GetItemInfo(link)
+                    if loc and equipSlotMap[loc] and self:CanPlayerWear(itemType, subType) then
+                        local score = self:GetScoreForLink(link)
+                        local isUp = self:GetUpgradeInfo(link, loc, score)
+
+                        if AEB_DEBUG_MODE == 1 then
+                            print("|cff00ffffDEBUG: UpdateTrainerArrows - loc=" .. tostring(loc) .. ", score=" .. tostring(score) .. ", isUp=" .. tostring(isUp) .. "|r")
+                        end
+
+                        if isUp then
+                            -- Создаём или переиспользуем маркер для этой кнопки
+                            if not self.trainerArrows[i] then
+                                local arrow = CreateFrame("Frame", nil, button)
+                                arrow:SetSize(18, 18)
+                                arrow:SetFrameLevel(button:GetFrameLevel() + 5)
+                                arrow.texture = arrow:CreateTexture(nil, "OVERLAY")
+                                arrow.texture:SetAllPoints(arrow)
+                                arrow.texture:SetTexture("Interface\\AddOns\\AutoEquipBetter\\Pictures\\GreenUpArrow.tga")
+                                self.trainerArrows[i] = arrow
+                            end
+
+                            local arrow = self.trainerArrows[i]
+                            arrow:SetParent(button)
+                            arrow:ClearAllPoints()
+                            arrow:SetPoint("LEFT", button, "LEFT", 5, 0)
+                            arrow:Show()
+
+                            if AEB_DEBUG_MODE == 1 then
+                                print("|cff00ffffDEBUG: UpdateTrainerArrows - маркер показан для кнопки " .. i .. "|r")
+                            end
+                        end
+                    end
                 end
             end
         end
